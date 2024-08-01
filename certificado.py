@@ -14,6 +14,16 @@ import os
 import logging
 import json
 
+
+# python -m venv env 
+# \env\Scripts> Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+# \env\Scripts> .\Activate.ps1
+# pip install pandas reportlab PyPDF2 pdf2image pillow openpyxl
+# https://github.com/oschwartz10612/poppler-windows/releases
+# Extraer en C:\poppler\Library\bin
+# Agregar C:\poppler\Library\bin al PATH
+
+
 # Configurar logging
 logging.basicConfig(filename='errores_certificados.log', level=logging.ERROR)
 
@@ -37,8 +47,11 @@ def generar_certificados(plantilla_pdf, datos_excel, configuracion, directorio_s
             pagina=page.mediabox
             if pagina.right-pagina.left < pagina.top-pagina.bottom:
                 vertical=1
+                can.setPageSize((A4))  # Set canvas size to landscape mode
             else:
                 vertical=0
+                can.setPageSize((A4[1], A4[0]))  # Set canvas size to landscape mode
+                # Dibujar campos
 
             # Añadir texto al PDF
             for campo, config in configuracion.items():
@@ -93,6 +106,10 @@ class VistaPreviaAvanzada(ttk.Frame):
 
     def actualizar_vista_previa(self, plantilla_pdf, campos, nombre_curso):
         # Generar PDF de vista previa
+        if not os.path.exists(plantilla_pdf):
+            logging.error(f"File not found: {plantilla_pdf}")
+        # Handle the error, e.g., by showing a message to the user or skipping the file
+            return  # Exit the function if the file does not exist
         packet = io.BytesIO()
         can = canvas.Canvas(packet, pagesize=A4)
         existing_pdf = PdfReader(plantilla_pdf)
@@ -100,13 +117,16 @@ class VistaPreviaAvanzada(ttk.Frame):
         pagina=page.mediabox
         if pagina.right-pagina.left < pagina.top-pagina.bottom:
             vertical=1
+            can.setPageSize((A4))  # Set canvas size to landscape mode
         else:
             vertical=0
+            can.setPageSize((A4[1], A4[0]))  # Set canvas size to landscape mode
                 # Dibujar campos
         for campo, config in campos.items():
             can.setFont(config['fuente'], config['tamaño'])
             texto = str(campo)
             ancho_texto = stringWidth(texto, config['fuente'], config['tamaño'])
+
             if config['alineacion'] == 'Centro':
                 x = config['x'] - (ancho_texto / 2)
             elif config['alineacion'] == 'Derecha':
@@ -258,6 +278,14 @@ class Application(tk.Frame):
         alineacion.set("Centro")
         alineacion.pack(side=tk.LEFT, padx=2)
 
+        ttk.Label(frame, text="Estilo:").pack(side=tk.LEFT)
+        bold_var = tk.BooleanVar()
+        bold_check = ttk.Checkbutton(frame, text="Negrita", variable=bold_var)
+        bold_check.pack(side=tk.LEFT, padx=2)
+        italic_var = tk.BooleanVar()
+        italic_check = ttk.Checkbutton(frame, text="Cursiva", variable=italic_var)
+        italic_check.pack(side=tk.LEFT, padx=2)
+
         ttk.Button(frame, text="Eliminar", command=lambda: frame.destroy()).pack(side=tk.RIGHT)
 
         # Añadir callback para actualizar la vista previa
@@ -303,17 +331,33 @@ class Application(tk.Frame):
 
     def obtener_config_campos(self):
         config = {}
+        
         for frame in self.campos_frame.winfo_children():
             entries = [widget for widget in frame.winfo_children() if isinstance(widget, (ttk.Entry, ttk.Combobox))]
             if len(entries) == 6:
                 campo, x, y, fuente, tamano, alineacion = entries
-                config[campo.get()] = {
-                    'x': int(x.get()),
-                    'y': int(y.get()),
-                    'fuente': fuente.get(),
-                    'tamaño': int(tamano.get()),
-                    'alineacion': alineacion.get()
-                }
+                try:
+                        # Assuming 'x' is a tkinter Entry widget or similar
+                    x_value = int(x.get()) if x.get().isdigit() else 0  # Default to 0 if not a valid integer string
+                except ValueError:
+                    logging.error(f"Invalid input for x: {x.get()}")
+                    x_value = 0  # Default to 0 or handle appropriately
+                try:
+                        # Assuming 'x' is a tkinter Entry widget or similar
+                    y_value = int(y.get()) if y.get().isdigit() else 0  # Default to 0 if not a valid integer string
+                except ValueError:
+                    logging.error(f"Invalid input for x: {y.get()}")
+                    y_value = 0  # Default to 0 or handle appropriately
+
+            config[campo.get()] = {
+                'x': int(x_value),
+                'y': int(y_value),
+                'fuente': fuente.get(),
+                'tamaño': int(tamano.get()),
+                'alineacion': alineacion.get(),
+                'negrita': bold_var.get(),
+                'cursiva': italic_var.get()
+            }
         return config
 
     def generar(self):
