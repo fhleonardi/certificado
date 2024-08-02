@@ -15,6 +15,7 @@ import logging
 import json
 
 
+
 # python -m venv env 
 # \env\Scripts> Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 # \env\Scripts> .\Activate.ps1
@@ -57,7 +58,15 @@ def generar_certificados(plantilla_pdf, datos_excel, configuracion, directorio_s
             for campo, config in configuracion.items():
                 if campo in row:
 
-                    can.setFont(config['fuente'], config['tamaño'])
+                                            
+                    font_name = get_font_name(config['fuente'], config['negrita'], config['cursiva'])
+
+                    try:
+                        can.setFont(font_name, config['tamaño'])
+                    except Exception as e:
+                        print(f"Error al establecer la fuente {font_name}: {e}")
+                        # Usar una fuente predeterminada si falla
+                        can.setFont("Helvetica", config['tamaño'])
                     texto = str(row[campo])
                     ancho_texto = stringWidth(texto, config['fuente'], config['tamaño'])
                     
@@ -97,11 +106,34 @@ def generar_certificados(plantilla_pdf, datos_excel, configuracion, directorio_s
             logging.error(f"Error al generar certificado para DNI {row['dni']}: {str(e)}")
 
     messagebox.showinfo("Proceso Completado", "Todos los certificados han sido generados.")
+def get_font_name(base_font, is_bold, is_italic):
+    if base_font == "Times-Roman":
+        if is_bold and is_italic:
+            return "Times-BoldItalic"
+        elif is_bold:
+            return "Times-Bold"
+        elif is_italic:
+            return "Times-Italic"
+        else:
+            return "Times-Roman"
+    # Manejar otras fuentes de manera similar
+    # Por ejemplo, para Helvetica:
+    elif base_font == "Helvetica":
+        if is_bold and is_italic:
+            return "Helvetica-BoldOblique"
+        elif is_bold:
+            return "Helvetica-Bold"
+        elif is_italic:
+            return "Helvetica-Oblique"
+        else:
+            return "Helvetica"
+    # Si no es una fuente conocida, devolver la base
+    return base_font
 
 class VistaPreviaAvanzada(ttk.Frame):
     def __init__(self, master, *args, **kwargs):
         super().__init__(master, *args, **kwargs)
-        self.canvas = tk.Canvas(self, width=400, height=566)  # Proporción A4
+        self.canvas = tk.Canvas(self, width=600, height=600)  # Proporción A4
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
     def actualizar_vista_previa(self, plantilla_pdf, campos, nombre_curso):
@@ -123,17 +155,23 @@ class VistaPreviaAvanzada(ttk.Frame):
             can.setPageSize((A4[1], A4[0]))  # Set canvas size to landscape mode
                 # Dibujar campos
         for campo, config in campos.items():
-            can.setFont(config['fuente'], config['tamaño'])
-            texto = str(campo)
-            ancho_texto = stringWidth(texto, config['fuente'], config['tamaño'])
+            font_name = get_font_name(config['fuente'], config['negrita'], config['cursiva'])
+            
+            try:
+                can.setFont(font_name, config['tamaño'])
+            except Exception as e:
+                print(f"Error al establecer la fuente {font_name}: {e}")
+                can.setFont("Helvetica", config['tamaño'])
 
+            texto = config.get('texto_muestra', campo)  # Usar texto de muestra si está disponible
+            ancho_texto = stringWidth(texto, font_name, config['tamaño'])
+            
             if config['alineacion'] == 'Centro':
                 x = config['x'] - (ancho_texto / 2)
             elif config['alineacion'] == 'Derecha':
                 x = config['x'] - ancho_texto
             else:  # 'Izquierda'
                 x = config['x']
-
             
             can.drawString(x, A4[vertical] - config['y'], texto)
         
@@ -159,7 +197,7 @@ class VistaPreviaAvanzada(ttk.Frame):
         img = images[0]
         
         # Redimensionar imagen
-        img.thumbnail((400, 566))  # Mantener proporción A4
+        img.thumbnail((600, 600))  # Mantener proporción A4
         
         # Mostrar en el canvas
         self.photo = ImageTk.PhotoImage(img)
@@ -184,7 +222,7 @@ class Application(tk.Frame):
 
     def create_widgets(self):
         # Frame principal
-        main_frame = ttk.Frame(self, padding="3 3 12 12")
+        main_frame = ttk.Frame(self, padding="30 30 12 12")
         main_frame.grid(column=0, row=0, sticky=(tk.N, tk.W, tk.E, tk.S)) # type: ignore
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
@@ -226,7 +264,7 @@ class Application(tk.Frame):
         
         
         self.vista_previa = VistaPreviaAvanzada(main_frame)
-        self.vista_previa.grid(column=3, row=0, rowspan=8, padx=10, pady=10, sticky=(tk.N, tk.S, tk.E, tk.W))
+        self.vista_previa.grid(column=3, row=0, rowspan=15, padx=10, pady=10, sticky=(tk.N, tk.S, tk.E, tk.W))
 
         for child in main_frame.winfo_children():
             child.grid_configure(padx=5, pady=5)
@@ -249,6 +287,10 @@ class Application(tk.Frame):
         ttk.Label(frame, text="Campo:").pack(side=tk.LEFT)
         campo = ttk.Combobox(frame, values=self.excel_columns, width=10)
         campo.pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(frame, text="Texto de muestra:").pack(side=tk.LEFT)
+        texto_muestra = ttk.Entry(frame, width=15)
+        texto_muestra.pack(side=tk.LEFT, padx=2)
 
         ttk.Label(frame, text="X:").pack(side=tk.LEFT)
         x_var = tk.StringVar(value="200")  # Valor por defecto
@@ -285,19 +327,21 @@ class Application(tk.Frame):
         italic_var = tk.BooleanVar()
         italic_check = ttk.Checkbutton(frame, text="Cursiva", variable=italic_var)
         italic_check.pack(side=tk.LEFT, padx=2)
-
+        frame.bold_var = bold_var
+        frame.italic_var = italic_var
         ttk.Button(frame, text="Eliminar", command=lambda: frame.destroy()).pack(side=tk.RIGHT)
 
         # Añadir callback para actualizar la vista previa
         campo.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
+        texto_muestra.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
         x.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
         y.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
         fuente.bind('<<ComboboxSelected>>', lambda e: self.actualizar_vista_previa())
         tamano.bind('<<ComboboxSelected>>', lambda e: self.actualizar_vista_previa())
         alineacion.bind('<<ComboboxSelected>>', lambda e: self.actualizar_vista_previa())
-
-
-
+        bold_var.trace_add('write', lambda *args: self.actualizar_vista_previa())
+        italic_var.trace_add('write', lambda *args: self.actualizar_vista_previa())
+        return frame
 
     def buscar_plantilla(self):
         filename = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
@@ -334,30 +378,19 @@ class Application(tk.Frame):
         
         for frame in self.campos_frame.winfo_children():
             entries = [widget for widget in frame.winfo_children() if isinstance(widget, (ttk.Entry, ttk.Combobox))]
-            if len(entries) == 6:
-                campo, x, y, fuente, tamano, alineacion = entries
-                try:
-                        # Assuming 'x' is a tkinter Entry widget or similar
-                    x_value = int(x.get()) if x.get().isdigit() else 0  # Default to 0 if not a valid integer string
-                except ValueError:
-                    logging.error(f"Invalid input for x: {x.get()}")
-                    x_value = 0  # Default to 0 or handle appropriately
-                try:
-                        # Assuming 'x' is a tkinter Entry widget or similar
-                    y_value = int(y.get()) if y.get().isdigit() else 0  # Default to 0 if not a valid integer string
-                except ValueError:
-                    logging.error(f"Invalid input for x: {y.get()}")
-                    y_value = 0  # Default to 0 or handle appropriately
-
-            config[campo.get()] = {
-                'x': int(x_value),
-                'y': int(y_value),
-                'fuente': fuente.get(),
-                'tamaño': int(tamano.get()),
-                'alineacion': alineacion.get(),
-                'negrita': bold_var.get(),
-                'cursiva': italic_var.get()
-            }
+            if len(entries) >= 7:  # Ahora tenemos un campo más
+                campo, texto_muestra, x, y, fuente, tamano, alineacion = entries[:7]
+                
+                config[campo.get()] = {
+                    'texto_muestra': texto_muestra.get(),
+                    'x': int(x.get()) if x.get().isdigit() else 0,
+                    'y': int(y.get()) if y.get().isdigit() else 0,
+                    'fuente': fuente.get(),
+                    'tamaño': int(tamano.get()),
+                    'alineacion': alineacion.get(),
+                    'negrita': frame.bold_var.get(),
+                    'cursiva': frame.italic_var.get()
+                }
         return config
 
     def generar(self):
@@ -429,14 +462,23 @@ class Application(tk.Frame):
 
             # Cargar configuración de campos
             for campo, valores in config.get('campos', {}).items():
-                self.agregar_campo()
-                frame = self.campos_frame.winfo_children()[-1]
+                frame = self.agregar_campo()
                 entries = [widget for widget in frame.winfo_children() if isinstance(widget, (ttk.Entry, ttk.Combobox))]
-                entries[0].insert(0, campo)
-                entries[1].insert(0, valores['x'])
-                entries[2].insert(0, valores['y'])
-                entries[3].set(valores['fuente'])
-                entries[4].set(valores['tamaño'])
+                
+                campo_entry, texto_muestra_entry, x_entry, y_entry, fuente_combo, tamano_combo, alineacion_combo = entries[:7]
+                
+                campo_entry.insert(0, campo)
+                texto_muestra_entry.insert(0, valores.get('texto_muestra', ''))
+                x_entry.insert(0, valores['x'])
+                y_entry.insert(0, valores['y'])
+                fuente_combo.set(valores['fuente'])
+                tamano_combo.set(valores['tamaño'])
+                alineacion_combo.set(valores['alineacion'])
+                
+                frame.bold_var.set(valores.get('negrita', False))
+                frame.italic_var.set(valores.get('cursiva', False))
+
+
 
             if filename != 'ultima_config.json':
                 messagebox.showinfo("Éxito", f"Configuración cargada desde:\n{filename}")
