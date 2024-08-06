@@ -1,28 +1,38 @@
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+import tkinter as tk    # importa la librería tkinter, sirve para crear interfaces gráficas
+from tkinter import filedialog, messagebox, ttk # importa las librerías tkinter, filedialog, messagebox y ttk
 import pandas as pd # importa la librería pandas, sirve para leer archivos de Excel
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.pdfmetrics import stringWidth
-from reportlab.pdfbase.ttfonts import TTFont
-from PyPDF2 import PdfReader, PdfWriter
-from pdf2image import convert_from_bytes
-from PIL import Image, ImageTk
-import io
-import os
-import logging
-import json
+from reportlab.pdfgen import canvas # importa la librería canvas, sirve para crear un PDF
+from reportlab.lib.pagesizes import A4  # importa la librería A4, sirve para establecer el tamaño de la página
+from reportlab.pdfbase import pdfmetrics    # importa la librería pdfmetrics, sirve para trabajar con métricas de PDF
+from reportlab.pdfbase.pdfmetrics import stringWidth    # importa la librería stringWidth, sirve para calcular el ancho de un texto      
+from reportlab.pdfbase.ttfonts import TTFont    # importa la librería TTFont, sirve para trabajar con fuentes TrueType
+from PyPDF2 import PdfReader, PdfWriter   # importa la librería PyPDF2, sirve para leer y escribir archivos PDF
+from pdf2image import convert_from_bytes    # importa la librería pdf2image, sirve para convertir PDF a imagen
+from PIL import Image, ImageTk      # importa la librería PIL, sirve para trabajar con imágenes
+import io   # importa la librería io, sirve para trabajar con archivos binarios
+import os   # importa la librería os, sirve para interactuar con el sistema operativo
+import logging # importa la librería logging, sirve para guardar errores en un archivo de texto
+import json # importa la librería json, sirve para leer y escribir archivos JSON
 
 
 
-# python -m venv env 
-# \env\Scripts> Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-# \env\Scripts> .\Activate.ps1
-# pip install pandas reportlab PyPDF2 pdf2image pillow openpyxl
-# https://github.com/oschwartz10612/poppler-windows/releases
-# Extraer en C:\poppler\Library\bin
-# Agregar C:\poppler\Library\bin al PATH
+# python -m venv env  # Crear un entorno virtual
+# \env\Scripts> Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser 
+# \env\Scripts> .\Activate.ps1 
+# pip install pandas reportlab PyPDF2 pdf2image pillow openpyxl 
+# https://github.com/oschwartz10612/poppler-windows/releases 
+# Extraer en C:\poppler\Library\bin 
+# Agregar C:\poppler\Library\bin al PATH 
+# Agregar pyinstaller con:
+# pip install pyinstaller
+# 
+# pyinstaller --onefile -w .\certificado.py --icon=certificado.ico
+#
+# Generar instalador con nullsoft installer
+#  
+
+
+
 
 
 # Configurar logging
@@ -64,7 +74,7 @@ def generar_certificados(plantilla_pdf, datos_excel, configuracion, directorio_s
                     try:
                         can.setFont(font_name, config['tamaño'])
                     except Exception as e:
-                        print(f"Error al establecer la fuente {font_name}: {e}")
+                        # print(f"Error al establecer la fuente {font_name}: {e}")
                         # Usar una fuente predeterminada si falla
                         can.setFont("Helvetica", config['tamaño'])
                     texto = str(row[campo])
@@ -100,7 +110,7 @@ def generar_certificados(plantilla_pdf, datos_excel, configuracion, directorio_s
             with open(ruta_completa, "wb") as output_stream:
                 output.write(output_stream)
             
-            print(f"Certificado generado: {nombre_archivo}")
+            # print(f"Certificado generado: {nombre_archivo}")
         
         except Exception as e:
             logging.error(f"Error al generar certificado para DNI {row['dni']}: {str(e)}")
@@ -160,7 +170,7 @@ class VistaPreviaAvanzada(ttk.Frame):
             try:
                 can.setFont(font_name, config['tamaño'])
             except Exception as e:
-                print(f"Error al establecer la fuente {font_name}: {e}")
+                # print(f"Error al establecer la fuente {font_name}: {e}")
                 can.setFont("Helvetica", config['tamaño'])
 
             texto = config.get('texto_muestra', campo)  # Usar texto de muestra si está disponible
@@ -214,7 +224,7 @@ class Application(tk.Frame):
         self.create_widgets()
         self.campo_config = {}
         self.cargar_config('ultima_config.json')  # Cargar la última configuración al iniciar
-        print(self.datos_entry.get())
+        # print(self.datos_entry.get())
         if self.datos_entry.get() != '':
             filename = self.datos_entry.get()
             self.cargar_columnas_excel(filename)
@@ -222,7 +232,7 @@ class Application(tk.Frame):
 
     def create_widgets(self):
         # Frame principal
-        main_frame = ttk.Frame(self, padding="30 30 12 12")
+        main_frame = ttk.Frame(self, padding="10 10 10 10")
         main_frame.grid(column=0, row=0, sticky=(tk.N, tk.W, tk.E, tk.S)) # type: ignore
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
@@ -282,56 +292,66 @@ class Application(tk.Frame):
 
     def agregar_campo(self):
         frame = ttk.Frame(self.campos_frame)
-        frame.pack(fill=tk.X, expand=True, pady=2)
-
-        ttk.Label(frame, text="Campo:").pack(side=tk.LEFT)
+        frame.grid(sticky='ew')  # Use grid instead of pack
+        
+        row = len(self.campos_frame.grid_slaves())  # Get the number of existing rows
+        
+        ttk.Label(frame, text="Campo:").grid(row=0, column=0, sticky='w')
         campo = ttk.Combobox(frame, values=self.excel_columns, width=10)
-        campo.pack(side=tk.LEFT, padx=2)
+        campo.grid(row=0, column=1, padx=4, sticky='w')
 
-        ttk.Label(frame, text="Texto de muestra:").pack(side=tk.LEFT)
+        ttk.Label(frame, text="Muestra:").grid(row=0, column=2, sticky='w')
         texto_muestra = ttk.Entry(frame, width=15)
-        texto_muestra.pack(side=tk.LEFT, padx=2)
+        texto_muestra.grid(row=0, column=3, padx=4,pady=4, sticky='w')
 
-        ttk.Label(frame, text="X:").pack(side=tk.LEFT)
-        x_var = tk.StringVar(value="200")  # Valor por defecto
+        ttk.Label(frame, text="X:").grid(row=0, column=4, sticky='w')
+        x_var = tk.StringVar(value="200")
         x = ttk.Entry(frame, width=5, textvariable=x_var)
-        x.pack(side=tk.LEFT, padx=2)
+        x.grid(row=0, column=5, padx=4, sticky='w')
 
-        ttk.Label(frame, text="Y:").pack(side=tk.LEFT)
-        y_var = tk.StringVar(value="200")  # Valor por defecto
+        ttk.Label(frame, text="Y:").grid(row=0, column=6, sticky='w')
+        y_var = tk.StringVar(value="200")
         y = ttk.Entry(frame, width=5, textvariable=y_var)
-        y.pack(side=tk.LEFT, padx=2)
+        y.grid(row=0, column=7, padx=4, sticky='w')
 
-        ttk.Label(frame, text="Fuente:").pack(side=tk.LEFT)
+        ttk.Label(frame, text="Fuente:").grid(row=0, column=8, sticky='w')
         fuentes = ["Helvetica", "Times-Roman", "Courier"]
         fuente = ttk.Combobox(frame, values=fuentes, width=10)
-        fuente.set(fuentes[0])
-        fuente.pack(side=tk.LEFT, padx=2)
+        fuente.set(fuentes[1])
+        fuente.grid(row=0, column=9, padx=4, sticky='w')
 
-        ttk.Label(frame, text="Tamaño:").pack(side=tk.LEFT)
+        ttk.Label(frame, text="Tamaño:").grid(row=1, column=0, sticky='w')
         tamanos = list(range(8, 73, 2))
         tamano = ttk.Combobox(frame, values=tamanos, width=5)
-        tamano.set(12)
-        tamano.pack(side=tk.LEFT, padx=2)
+        tamano.set(20)
+        tamano.grid(row=1, column=1, padx=2, sticky='w')
 
-        ttk.Label(frame, text="Alineación:").pack(side=tk.LEFT)
+        ttk.Label(frame, text="Alineación:").grid(row=1, column=2, sticky='w')
         alineaciones = ["Izquierda", "Centro", "Derecha"]
         alineacion = ttk.Combobox(frame, values=alineaciones, width=8)
         alineacion.set("Centro")
-        alineacion.pack(side=tk.LEFT, padx=2)
+        alineacion.grid(row=1, column=3, padx=4, sticky='w')
 
-        ttk.Label(frame, text="Estilo:").pack(side=tk.LEFT)
+        ttk.Label(frame, text="Estilo:").grid(row=1, column=4, sticky='w')
         bold_var = tk.BooleanVar()
         bold_check = ttk.Checkbutton(frame, text="Negrita", variable=bold_var)
-        bold_check.pack(side=tk.LEFT, padx=2)
+        bold_check.grid(row=1, column=5, padx=4, sticky='w')
         italic_var = tk.BooleanVar()
         italic_check = ttk.Checkbutton(frame, text="Cursiva", variable=italic_var)
-        italic_check.pack(side=tk.LEFT, padx=2)
+        italic_check.grid(row=1, column=6, padx=4, sticky='w')
         frame.bold_var = bold_var
         frame.italic_var = italic_var
-        ttk.Button(frame, text="Eliminar", command=lambda: frame.destroy()).pack(side=tk.RIGHT)
 
-        # Añadir callback para actualizar la vista previa
+        ttk.Button(frame, text="Eliminar", command=lambda: frame.destroy()).grid(row=2, column=4, padx=2, sticky='e')
+            # Add a separator after the "Eliminar" button
+        separator = ttk.Separator(frame, orient='horizontal')
+        separator.grid(row=3, column=0, columnspan=10, sticky='ew', pady=5)
+
+        # Store the separator reference in the frame for later use
+        frame.separator = separator
+        
+
+        # Add callbacks for updating preview
         campo.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
         texto_muestra.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
         x.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
@@ -341,6 +361,7 @@ class Application(tk.Frame):
         alineacion.bind('<<ComboboxSelected>>', lambda e: self.actualizar_vista_previa())
         bold_var.trace_add('write', lambda *args: self.actualizar_vista_previa())
         italic_var.trace_add('write', lambda *args: self.actualizar_vista_previa())
+
         return frame
 
     def buscar_plantilla(self):
@@ -359,12 +380,10 @@ class Application(tk.Frame):
         try:
             df = pd.read_excel(filename)
             self.excel_columns = list(df.columns)
-            print(f"Columnas del Excel: {self.excel_columns}")
             for frame in self.campos_frame.winfo_children():
                 campo = frame.winfo_children()[1]  # El combobox de campo está en la segunda posición
                 campo['values'] = self.excel_columns
         except Exception as e:
-            print(f"Error al cargar columnas del Excel: {str(e)}")
             messagebox.showerror("Error", f"Error al cargar columnas del archivo Excel: {str(e)}")
 
 
@@ -486,5 +505,6 @@ class Application(tk.Frame):
 
 
 root = tk.Tk()  # Crear la ventana principal
+root.iconphoto(False, tk.PhotoImage(file='Certificado.png'))    # Establecer el icono de la ventana
 app = Application(master=root) # Crear la aplicación
 app.mainloop() # Iniciar la aplicación
