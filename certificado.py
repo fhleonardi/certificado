@@ -13,7 +13,22 @@ import io   # importa la librería io, sirve para trabajar con archivos binarios
 import os   # importa la librería os, sirve para interactuar con el sistema operativo
 import logging # importa la librería logging, sirve para guardar errores en un archivo de texto
 import json # importa la librería json, sirve para leer y escribir archivos JSON
+import threading
+from functools import wraps
 
+def debounce(wait):
+    def decorator(fn):
+        def debounced(*args, **kwargs):
+            def call_it():
+                fn(*args, **kwargs)
+            try:
+                debounced.t.cancel()
+            except(AttributeError):
+                pass
+            debounced.t = threading.Timer(wait, call_it)
+            debounced.t.start()
+        return debounced
+    return decorator
 
 
 # python -m venv env  # Crear un entorno virtual
@@ -76,7 +91,7 @@ def generar_certificados(plantilla_pdf, datos_excel, configuracion, directorio_s
                     except Exception as e:
                         # print(f"Error al establecer la fuente {font_name}: {e}")
                         # Usar una fuente predeterminada si falla
-                        can.setFont("Helvetica", config['tamaño'])
+                        can.setFont("Times-Roman", config['tamaño'])
                     texto = str(row[campo])
                     ancho_texto = stringWidth(texto, config['fuente'], config['tamaño'])
                     
@@ -101,9 +116,14 @@ def generar_certificados(plantilla_pdf, datos_excel, configuracion, directorio_s
             
             page.merge_page(nuevo_pdf.pages[0])
             output.add_page(page)
-            
+            numbers = []
+            for word in row['dni'].split():
+
+                if word.isdigit():
+                    numbers.append(int(word))
+
             # Crear el nombre del archivo
-            nombre_archivo = f"{nombre_curso}_{row['dni']}.pdf"
+            nombre_archivo = f"{nombre_curso}_{numbers[0]}.pdf"
             ruta_completa = os.path.join(directorio_salida, nombre_archivo)
             
             # Guardar el nuevo certificado
@@ -119,10 +139,10 @@ def generar_certificados(plantilla_pdf, datos_excel, configuracion, directorio_s
 def get_font_name(base_font, is_bold, is_italic):
     if base_font == "Times-Roman":
         if is_bold and is_italic:
-            return "Times-BoldItalic"
+            return "Times-BoldItalic" 
         elif is_bold:
-            return "Times-Bold"
-        elif is_italic:
+            return "Times-Bold" 
+        elif is_italic: 
             return "Times-Italic"
         else:
             return "Times-Roman"
@@ -277,17 +297,27 @@ class Application(tk.Frame):
         self.vista_previa.grid(column=3, row=0, rowspan=15, padx=10, pady=10, sticky=(tk.N, tk.S, tk.E, tk.W))
 
         for child in main_frame.winfo_children():
-            child.grid_configure(padx=5, pady=5)
+            child.grid_configure(padx=5, pady=5) # Add padding to all widgets
         self.curso_entry.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
 
 
-
+    @debounce(1)  # Debounce with a 0.5 second delay
     def actualizar_vista_previa(self):
         plantilla = self.plantilla_entry.get()
         campos = self.obtener_config_campos()
         nombre_curso = self.curso_entry.get()
         if plantilla and campos and nombre_curso:
-            self.vista_previa.actualizar_vista_previa(plantilla, campos, nombre_curso)
+            try:
+                plantilla = self.plantilla_entry.get()
+                campos = self.obtener_config_campos()
+                nombre_curso = self.curso_entry.get()
+                if plantilla and campos and nombre_curso:
+                    self.vista_previa.actualizar_vista_previa(plantilla, campos, nombre_curso)
+                    
+            except Exception as e:
+                logging.error(f"Error updating preview: {e}")
+    
+
 
 
     def agregar_campo(self):
@@ -352,6 +382,10 @@ class Application(tk.Frame):
         
 
         # Add callbacks for updating preview
+        self.plantilla_entry.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
+        self.datos_entry.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
+        self.curso_entry.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
+        self.salida_entry.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
         campo.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
         texto_muestra.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
         x.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
@@ -425,7 +459,7 @@ class Application(tk.Frame):
 
         self.guardar_config()  # Guardar la configuración actual antes de generar
         generar_certificados(plantilla, datos, config, salida, curso)
-        self.actualizar_vista_previa()
+        #self.actualizar_vista_previa()
 
 
 
@@ -505,6 +539,9 @@ class Application(tk.Frame):
 
 
 root = tk.Tk()  # Crear la ventana principal
+root.geometry("1366x768")    # Establecer el tamaño de la ventana
+root.resizable(False, False)    # La ventana no se puede redimensionar
+# root.iconbitmap('Certificado.ico')    # Establecer el icono de la ventana
 root.iconphoto(False, tk.PhotoImage(file='Certificado.png'))    # Establecer el icono de la ventana
 app = Application(master=root) # Crear la aplicación
 app.mainloop() # Iniciar la aplicación
