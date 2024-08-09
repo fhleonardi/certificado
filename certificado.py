@@ -1,12 +1,12 @@
 import tkinter as tk    # importa la librería tkinter, sirve para crear interfaces gráficas
 from tkinter import filedialog, messagebox, ttk # importa las librerías tkinter, filedialog, messagebox y ttk
 import pandas as pd # importa la librería pandas, sirve para leer archivos de Excel
-from reportlab.pdfgen import canvas # importa la librería canvas, sirve para crear un PDF
+#from reportlab.pdfgen import canvas # importa la librería canvas, sirve para crear un PDF
 from reportlab.lib.pagesizes import A4  # importa la librería A4, sirve para establecer el tamaño de la página
-from reportlab.pdfbase import pdfmetrics    # importa la librería pdfmetrics, sirve para trabajar con métricas de PDF
+#from reportlab.pdfbase import pdfmetrics    # importa la librería pdfmetrics, sirve para trabajar con métricas de PDF
 from reportlab.pdfbase.pdfmetrics import stringWidth    # importa la librería stringWidth, sirve para calcular el ancho de un texto      
-from reportlab.pdfbase.ttfonts import TTFont    # importa la librería TTFont, sirve para trabajar con fuentes TrueType
-from PyPDF2 import PdfReader, PdfWriter   # importa la librería PyPDF2, sirve para leer y escribir archivos PDF
+#from reportlab.pdfbase.ttfonts import TTFont    # importa la librería TTFont, sirve para trabajar con fuentes TrueType
+#from PyPDF2 import PdfReader, PdfWriter   # importa la librería PyPDF2, sirve para leer y escribir archivos PDF
 import fitz  # PyMuPDF
 from PIL import Image, ImageTk
 import io
@@ -34,7 +34,7 @@ def debounce(wait):
 # python -m venv env  # Crear un entorno virtual
 # \env\Scripts> Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser 
 # \env\Scripts> .\Activate.ps1 
-# pip install pandas reportlab PyPDF2 pdf2image pillow openpyxl 
+# pip install pandas reportlab pillow openpyxl PyMuPDF
 # https://github.com/oschwartz10612/poppler-windows/releases 
 # Extraer en C:\poppler\Library\bin 
 # Agregar C:\poppler\Library\bin al PATH 
