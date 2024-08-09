@@ -7,9 +7,9 @@ from reportlab.pdfbase import pdfmetrics    # importa la librería pdfmetrics, s
 from reportlab.pdfbase.pdfmetrics import stringWidth    # importa la librería stringWidth, sirve para calcular el ancho de un texto      
 from reportlab.pdfbase.ttfonts import TTFont    # importa la librería TTFont, sirve para trabajar con fuentes TrueType
 from PyPDF2 import PdfReader, PdfWriter   # importa la librería PyPDF2, sirve para leer y escribir archivos PDF
-from pdf2image import convert_from_bytes    # importa la librería pdf2image, sirve para convertir PDF a imagen
-from PIL import Image, ImageTk      # importa la librería PIL, sirve para trabajar con imágenes
-import io   # importa la librería io, sirve para trabajar con archivos binarios
+import fitz  # PyMuPDF
+from PIL import Image, ImageTk
+import io
 import os   # importa la librería os, sirve para interactuar con el sistema operativo
 import logging # importa la librería logging, sirve para guardar errores en un archivo de texto
 import json # importa la librería json, sirve para leer y escribir archivos JSON
@@ -41,7 +41,7 @@ def debounce(wait):
 # Agregar pyinstaller con:
 # pip install pyinstaller
 # 
-# pyinstaller --onefile -w .\certificado.py --icon=certificado.ico
+# pyinstaller --onefile -w .\certificado.py --icon=certificado.png
 #
 # Generar instalador con nullsoft installer
 #  
@@ -54,89 +54,89 @@ def debounce(wait):
 logging.basicConfig(filename='errores_certificados.log', level=logging.ERROR)
 
 def generar_certificados(plantilla_pdf, datos_excel, configuracion, directorio_salida, nombre_curso):
-    # Leer datos del Excel
-    df = pd.read_excel(datos_excel) # lee el archivo Excel y lo guarda en la variable df
-    
-    # Leer la plantilla PDF
+    df = pd.read_excel(datos_excel)
 
-    for index, row in df.iterrows(): # itera sobre cada fila del archivo Excel
-
+    for index, row in df.iterrows():
         try:
+            # Open the template PDF
+            doc = fitz.open(plantilla_pdf)
+            page = doc[0]  # Assume we're working with the first page
 
-            # Crear un nuevo PDF
-            output = PdfWriter()
-            plantilla = PdfReader(plantilla_pdf)
-            packet = io.BytesIO() # crea un archivo temporal en memoria
-            can = canvas.Canvas(packet, pagesize=A4) # crea un objeto canvas para dibujar en el PDF, con tamaño A4. 
+            # Create a new PDF for this certificate
+            output_pdf = fitz.open()
+            output_page = output_pdf.new_page(width=page.rect.width, height=page.rect.height)
 
-            page = plantilla.pages[0]
-            pagina=page.mediabox
-            if pagina.right-pagina.left < pagina.top-pagina.bottom:
-                vertical=1
-                can.setPageSize((A4))  # Set canvas size to landscape mode
-            else:
-                vertical=0
-                can.setPageSize((A4[1], A4[0]))  # Set canvas size to landscape mode
-                # Dibujar campos
+            # Copy the content of the template to the new page
+            output_page.show_pdf_page(page.rect, doc, 0)
 
-            # Añadir texto al PDF
+            # Add text fields
             for campo, config in configuracion.items():
                 if campo in row:
-
-                                            
-                    font_name = get_font_name(config['fuente'], config['negrita'], config['cursiva'])
-
-                    try:
-                        can.setFont(font_name, config['tamaño'])
-                    except Exception as e:
-                        # print(f"Error al establecer la fuente {font_name}: {e}")
-                        # Usar una fuente predeterminada si falla
-                        can.setFont("Times-Roman", config['tamaño'])
-                    texto = str(row[campo])
-                    ancho_texto = stringWidth(texto, config['fuente'], config['tamaño'])
+                    text = str(row[campo])
+                    font_name = config['fuente']
+                    font_size = config['tamaño']
+                    is_bold = config.get('negrita', False)
+                    is_italic = config.get('cursiva', False)
                     
+                    match font_name:
+                        case "Times-Roman":
+                            font_name = "tiro"
+                            if is_bold and is_italic:
+                                font_name = "tibi"
+                            elif is_bold:
+                                font_name = "tibo"
+                            elif is_italic:
+                                font_name = "tiit"
+                        case "Helvetica":
+                            font_name = "helv"
+                            if is_bold and is_italic:
+                                font_name = "hebi" 
+                            elif is_bold:
+                                font_name = "hebo"  
+                            elif is_italic:
+                                font_name = "heit"
+                        case "Courier":
+                            font_name = "courier"
+                            if is_bold and is_italic:
+                                font_name = "cobi"
+                            elif is_bold:
+                                font_name = "cobo"
+                            elif is_italic:
+                                font_name = "coit"
+
+                    ancho_texto = stringWidth(text, config['fuente'], config['tamaño'])
+                        
                     if config['alineacion'] == 'Centro':
-                        x = config['x'] - (ancho_texto / 2)
+                            x = config['x'] - (ancho_texto / 2)
                     elif config['alineacion'] == 'Derecha':
-                        x = config['x'] - ancho_texto
+                            x = config['x'] - ancho_texto
                     else:  # 'Izquierda'
-                        x = config['x']
-                    
-                    can.drawString(x, A4[vertical] - config['y'], texto)
+                            x = config['x']
+                        
+                        #can.drawString(x, A4[vertical] - config['y'], texto)
 
-      
-            can.save()
-            
-            # Mover al inicio del BytesIO
-            packet.seek(0)
-            nuevo_pdf = PdfReader(packet)
-            
-            # Fusionar con la plantilla
+                    # PyMuPDF uses top-left origin, so we need to adjust y-coordinate
+                                    #y = page.rect.height - config['y']
+                    y = config['y']
 
-            
-            page.merge_page(nuevo_pdf.pages[0])
-            output.add_page(page)
-            numbers = []
-            for word in row['dni'].split():
+                    # Add text to the page
+                    output_page.insert_text((x, y), text, fontname=font_name, fontsize=font_size)
 
-                if word.isdigit():
-                    numbers.append(int(word))
 
-            # Crear el nombre del archivo
-            nombre_archivo = f"{nombre_curso}_{numbers[0]}.pdf"
-            ruta_completa = os.path.join(directorio_salida, nombre_archivo)
+            # Save the certificate
             
-            # Guardar el nuevo certificado
-            with open(ruta_completa, "wb") as output_stream:
-                output.write(output_stream)
-            
-            # print(f"Certificado generado: {nombre_archivo}")
-        
+            output_filename = f"{nombre_curso}_{row['dni']}.pdf"
+            output_path = os.path.join(directorio_salida, output_filename)
+            output_pdf.save(output_path)
+            output_pdf.close()
+
         except Exception as e:
             logging.error(f"Error al generar certificado para DNI {row['dni']}: {str(e)}")
 
     messagebox.showinfo("Proceso Completado", "Todos los certificados han sido generados.")
-def get_font_name(base_font, is_bold, is_italic):
+    
+    
+    """_summary_def get_font_name(base_font, is_bold, is_italic):
     if base_font == "Times-Roman":
         if is_bold and is_italic:
             return "Times-BoldItalic" 
@@ -159,6 +159,7 @@ def get_font_name(base_font, is_bold, is_italic):
             return "Helvetica"
     # Si no es una fuente conocida, devolver la base
     return base_font
+    """
 
 class VistaPreviaAvanzada(ttk.Frame):
     def __init__(self, master, *args, **kwargs):
@@ -167,72 +168,92 @@ class VistaPreviaAvanzada(ttk.Frame):
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
     def actualizar_vista_previa(self, plantilla_pdf, campos, nombre_curso):
-        # Generar PDF de vista previa
-        if not os.path.exists(plantilla_pdf):
-            logging.error(f"File not found: {plantilla_pdf}")
-        # Handle the error, e.g., by showing a message to the user or skipping the file
-            return  # Exit the function if the file does not exist
-        packet = io.BytesIO()
-        can = canvas.Canvas(packet, pagesize=A4)
-        existing_pdf = PdfReader(plantilla_pdf)
-        page = existing_pdf.pages[0]
-        pagina=page.mediabox
-        if pagina.right-pagina.left < pagina.top-pagina.bottom:
-            vertical=1
-            can.setPageSize((A4))  # Set canvas size to landscape mode
-        else:
-            vertical=0
-            can.setPageSize((A4[1], A4[0]))  # Set canvas size to landscape mode
-                # Dibujar campos
-        for campo, config in campos.items():
-            font_name = get_font_name(config['fuente'], config['negrita'], config['cursiva'])
-            
-            try:
-                can.setFont(font_name, config['tamaño'])
-            except Exception as e:
-                # print(f"Error al establecer la fuente {font_name}: {e}")
-                can.setFont("Helvetica", config['tamaño'])
+        try:
+            # Open the PDF
+            doc = fitz.open(plantilla_pdf)
+            page = doc[0]  # Get the first page
 
-            texto = config.get('texto_muestra', campo)  # Usar texto de muestra si está disponible
-            ancho_texto = stringWidth(texto, font_name, config['tamaño'])
-            
-            if config['alineacion'] == 'Centro':
-                x = config['x'] - (ancho_texto / 2)
-            elif config['alineacion'] == 'Derecha':
-                x = config['x'] - ancho_texto
-            else:  # 'Izquierda'
-                x = config['x']
-            
-            can.drawString(x, A4[vertical] - config['y'], texto)
-        
-        
-        can.save()
-        
-        # Combinar con la plantilla
-        packet.seek(0)
-        new_pdf = PdfReader(packet)
-        
-        output = PdfWriter()
-        
+            # Create a new PDF with the fields
+            output_buffer = io.BytesIO()
+            output_pdf = fitz.open()
+            output_page = output_pdf.new_page(width=page.rect.width, height=page.rect.height)
 
-        page.merge_page(new_pdf.pages[0])
-        output.add_page(page)
-        
-        # Convertir PDF a imagen
-        pdf_bytes = io.BytesIO()
-        output.write(pdf_bytes)
-        pdf_bytes.seek(0)
-        
-        images = convert_from_bytes(pdf_bytes.getvalue())
-        img = images[0]
-        
-        # Redimensionar imagen
-        img.thumbnail((600, 600))  # Mantener proporción A4
-        
-        # Mostrar en el canvas
-        self.photo = ImageTk.PhotoImage(img)
-        self.canvas.delete("all")
-        self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+            # Copy the content of the template to the new page
+            output_page.show_pdf_page(page.rect, doc, 0)
+
+            # Add text fields
+            for campo, config in campos.items():
+                text = config.get('texto_muestra', campo)
+                font_name = config['fuente']
+                font_size = config['tamaño']
+                is_bold = config.get('negrita', False)
+                is_italic = config.get('cursiva', False)
+                    
+                # PyMuPDF uses different font names
+                
+                match font_name:
+                    case "Times-Roman":
+                        font_name = "tiro"
+                        if is_bold and is_italic:
+                            font_name = "tibi"
+                        elif is_bold:
+                            font_name = "tibo"
+                        elif is_italic:
+                            font_name = "tiit"
+                    case "Helvetica":
+                        font_name = "helv"
+                        if is_bold and is_italic:
+                            font_name = "hebi" 
+                        elif is_bold:
+                            font_name = "hebo"  
+                        elif is_italic:
+                            font_name = "heit"
+                    case "Courier":
+                        font_name = "courier"
+                        if is_bold and is_italic:
+                            font_name = "cobi"
+                        elif is_bold:
+                            font_name = "cobo"
+                        elif is_italic:
+                            font_name = "coit"
+                            
+                ancho_texto = stringWidth(text, config['fuente'], config['tamaño'])
+                    
+                if config['alineacion'] == 'Centro':
+                        x = config['x'] - (ancho_texto / 2)
+                elif config['alineacion'] == 'Derecha':
+                        x = config['x'] - ancho_texto
+                else:  # 'Izquierda'
+                        x = config['x']
+                    
+                    #can.drawString(x, A4[vertical] - config['y'], texto)
+
+                # PyMuPDF uses top-left origin, so we need to adjust y-coordinate
+                                #y = page.rect.height - config['y']
+                y = config['y']
+                
+
+                # Add text to the page
+                output_page.insert_text((x, y), text, fontname=font_name, fontsize=font_size)
+
+            # Save the preview PDF
+            output_pdf.save(output_buffer)
+            output_buffer.seek(0)
+
+            # Convert PDF to image
+            pix = output_page.get_pixmap(matrix=fitz.Matrix(2, 2))  # Increase resolution
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+            # Resize image to fit canvas
+            img.thumbnail((600, 600))  # Maintain aspect ratio
+
+            # Display in canvas
+            self.photo = ImageTk.PhotoImage(img)
+            self.canvas.delete("all")
+            self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+
+        except Exception as e:
+            print(f"Error updating preview: {e}")
 
 class Application(tk.Frame):
     def __init__(self, master=None):
