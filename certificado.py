@@ -14,7 +14,7 @@ import os   # importa la librería os, sirve para interactuar con el sistema ope
 import logging # importa la librería logging, sirve para guardar errores en un archivo de texto
 import json # importa la librería json, sirve para leer y escribir archivos JSON
 import threading
-from functools import wraps
+#from functools import wraps
 
 def debounce(wait):
     def decorator(fn):
