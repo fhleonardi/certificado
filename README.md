@@ -1,2 +1,2 @@
 - **Título del Proyecto: Certificados en PDF**
-- **Descripción: Aplicación para generar certificados de curso en PDF desde un archivo en EXCEL, utilizando un plantilla en PDF**
+- **Descripción: Aplicación para generar certificados de curso en PDF desde un archivo en EXCEL, utilizando una plantilla en PDF**
