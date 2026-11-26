@@ -10,13 +10,14 @@ Entorno (crearlo FUERA de OneDrive: OneDrive libera archivos del venv y rompe pi
     pip install pandas openpyxl reportlab pillow PyMuPDF customtkinter pyinstaller
 
 Ejecutable:
-    pyinstaller --onefile -w certificado.py --icon=certificado.png
+    pyinstaller --onefile -w certificado.py --icon=certificado.png --add-data "certificado.png:."
 """
 import json
 import logging
 import os
 import queue
 import re
+import sys
 import tempfile
 import threading
 import tkinter as tk
@@ -30,8 +31,15 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 
 logging.basicConfig(filename='errores_certificados.log', level=logging.WARNING)
 
-CONFIG_ULTIMA = 'ultima_config.json'
-ICONO = 'certificado.png'
+CONFIG_ULTIMA = 'ultima_config.json'  # Se lee y escribe en la carpeta de trabajo (al lado del .exe)
+ICONO = 'certificado.png'  # Recurso de solo lectura: va empaquetado dentro del .exe
+
+
+def ruta_recurso(nombre):
+    """Ruta a un recurso empaquetado: dentro del .exe usa la carpeta temporal de PyInstaller,
+    en desarrollo la carpeta del script."""
+    base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, nombre)
 
 FUENTES = ["Helvetica", "Times-Roman", "Courier"]
 TAMANOS = [str(t) for t in range(8, 73, 2)]
@@ -587,7 +595,7 @@ class Application(ctk.CTk):
         # por eso se usa iconbitmap con un .ico generado desde el .png (iconphoto no alcanza).
         try:
             ico = os.path.join(tempfile.gettempdir(), 'certificado_icono.ico')
-            Image.open(ICONO).save(ico, sizes=[(16, 16), (32, 32), (48, 48), (64, 64)])
+            Image.open(ruta_recurso(ICONO)).save(ico, sizes=[(16, 16), (32, 32), (48, 48), (64, 64)])
             self.iconbitmap(ico)
         except Exception as e:
             logging.warning(f"No se pudo cargar el icono: {e}")
