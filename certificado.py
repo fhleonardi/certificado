@@ -1,57 +1,112 @@
-import tkinter as tk    # importa la librería tkinter, sirve para crear interfaces gráficas
-from tkinter import filedialog, messagebox, ttk # importa las librerías tkinter, filedialog, messagebox y ttk
-import pandas as pd # importa la librería pandas, sirve para leer archivos de Excel
-#from reportlab.pdfgen import canvas # importa la librería canvas, sirve para crear un PDF
-from reportlab.lib.pagesizes import A4  # importa la librería A4, sirve para establecer el tamaño de la página
-#from reportlab.pdfbase import pdfmetrics    # importa la librería pdfmetrics, sirve para trabajar con métricas de PDF
-from reportlab.pdfbase.pdfmetrics import stringWidth    # importa la librería stringWidth, sirve para calcular el ancho de un texto      
-#from reportlab.pdfbase.ttfonts import TTFont    # importa la librería TTFont, sirve para trabajar con fuentes TrueType
-#from PyPDF2 import PdfReader, PdfWriter   # importa la librería PyPDF2, sirve para leer y escribir archivos PDF
-import fitz  # PyMuPDF
-from PIL import Image, ImageTk
-import io
-import os   # importa la librería os, sirve para interactuar con el sistema operativo
-import logging # importa la librería logging, sirve para guardar errores en un archivo de texto
-import json # importa la librería json, sirve para leer y escribir archivos JSON
+"""
+Generador de Certificados en PDF.
+
+Genera un certificado por fila de un Excel, escribiendo los campos elegidos
+sobre una plantilla PDF. La interfaz usa CustomTkinter.
+
+Entorno (crearlo FUERA de OneDrive: OneDrive libera archivos del venv y rompe pip):
+    python -m venv C:\\venvs\\certificado
+    C:\\venvs\\certificado\\Scripts\\activate
+    pip install pandas openpyxl reportlab pillow PyMuPDF customtkinter pyinstaller
+
+Ejecutable:
+    pyinstaller --onefile -w certificado.py --icon=certificado.png --add-data "certificado.png:."
+"""
+import json
+import logging
+import os
+import queue
+import re
+import sys
+import tempfile
 import threading
-#from functools import wraps
+import tkinter as tk
+from tkinter import filedialog, messagebox
 
-def debounce(wait):
-    def decorator(fn):
-        def debounced(*args, **kwargs):
-            def call_it():
-                fn(*args, **kwargs)
-            try:
-                debounced.t.cancel()
-            except(AttributeError):
-                pass
-            debounced.t = threading.Timer(wait, call_it)
-            debounced.t.start()
-        return debounced
-    return decorator
+import customtkinter as ctk
+import pandas as pd
+import pymupdf
+from PIL import Image, ImageTk
+from reportlab.pdfbase.pdfmetrics import stringWidth
 
-
-# python -m venv env  # Crear un entorno virtual
-# \env\Scripts> Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser 
-# \env\Scripts> .\Activate.ps1 
-# pip install pandas reportlab pillow openpyxl PyMuPDF
-# https://github.com/oschwartz10612/poppler-windows/releases 
-# Extraer en C:\poppler\Library\bin 
-# Agregar C:\poppler\Library\bin al PATH 
-# Agregar pyinstaller con:
-# pip install pyinstaller
-# 
-# pyinstaller --onefile -w .\certificado.py --icon=certificado.png
-#
-# Generar instalador con nullsoft installer
-#  
-
-
-
-
-
-# Configurar logging
 logging.basicConfig(filename='errores_certificados.log', level=logging.WARNING)
+
+CONFIG_ULTIMA = 'ultima_config.json'  # Se lee y escribe en la carpeta de trabajo (al lado del .exe)
+ICONO = 'certificado.png'  # Recurso de solo lectura: va empaquetado dentro del .exe
+
+
+def ruta_recurso(nombre):
+    """Ruta a un recurso empaquetado: dentro del .exe usa la carpeta temporal de PyInstaller,
+    en desarrollo la carpeta del script."""
+    base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, nombre)
+
+FUENTES = ["Helvetica", "Times-Roman", "Courier"]
+TAMANOS = [str(t) for t in range(8, 73, 2)]
+ALINEACIONES = ["Izquierda", "Centro", "Derecha"]
+
+CAMPO_POR_DEFECTO = {
+    'nombre': '',
+    'texto_muestra': 'Texto de ejemplo',
+    'x': 420,  # Centro horizontal de un A4 apaisado (842 pt)
+    'y': 270,
+    'fuente': 'Times-Roman',
+    'tamaño': 20,
+    'alineacion': 'Centro',
+    'negrita': True,
+    'cursiva': False,
+    'ancho_maximo': 600,  # 0 = sin límite
+    'interlineado': 25,   # 0 = automático (1.2 × tamaño)
+}
+
+# Colores (claro, oscuro)
+COLOR_CAMPO = '#3b82f6'
+COLOR_SELECCION = '#22c55e'
+FONDO_CANVAS = ('#d4d4d8', '#18181b')
+SOMBRA_PAGINA = ('#a1a1aa', '#09090b')
+BORDE_TARJETA = ('gray80', 'gray28')
+COLOR_ESTADO = {
+    'info': ('gray30', 'gray70'),
+    'ok': ('#15803d', '#4ade80'),
+    'error': ('#b91c1c', '#f87171'),
+}
+
+# Variantes por fuente: (normal, negrita, cursiva, negrita+cursiva).
+# Cada una es (nombre para PyMuPDF, nombre para medir con reportlab).
+# Medir con la variante correcta importa: la negrita es ~5% más ancha.
+_VARIANTES_FUENTE = {
+    "Times-Roman": (("tiro", "Times-Roman"), ("tibo", "Times-Bold"),
+                    ("tiit", "Times-Italic"), ("tibi", "Times-BoldItalic")),
+    "Helvetica": (("helv", "Helvetica"), ("hebo", "Helvetica-Bold"),
+                  ("heit", "Helvetica-Oblique"), ("hebi", "Helvetica-BoldOblique")),
+    "Courier": (("cour", "Courier"), ("cobo", "Courier-Bold"),
+                ("coit", "Courier-Oblique"), ("cobi", "Courier-BoldOblique")),
+}
+
+
+# ---------------------------------------------------------------------------
+# Lógica de PDF (sin interfaz)
+# ---------------------------------------------------------------------------
+
+def resolver_fuente(fuente, negrita, cursiva):
+    """Devuelve (nombre PyMuPDF, nombre reportlab) para la fuente y el estilo."""
+    variantes = _VARIANTES_FUENTE.get(fuente, _VARIANTES_FUENTE["Times-Roman"])
+    return variantes[int(bool(negrita)) + 2 * int(bool(cursiva))]
+
+
+def valor_texto(valor):
+    """Convierte un valor del Excel a texto: vacío para celdas vacías y sin '.0' en enteros."""
+    if pd.isna(valor):
+        return ''
+    if isinstance(valor, float) and valor.is_integer():
+        return str(int(valor))
+    return str(valor)
+
+
+def nombre_archivo_seguro(texto):
+    """Reemplaza los caracteres que Windows no admite en nombres de archivo."""
+    return re.sub(r'[\\/:*?"<>|]+', '_', str(texto)).strip() or 'sin_nombre'
+
 
 def dividir_texto_en_lineas(texto, fuente, tamaño, ancho_maximo):
     """
@@ -67,931 +122,933 @@ def dividir_texto_en_lineas(texto, fuente, tamaño, ancho_maximo):
 
     for palabra in palabras:
         linea_prueba = ' '.join(linea_actual + [palabra])
-        ancho_prueba = stringWidth(linea_prueba, fuente, tamaño)
-
-        if ancho_prueba <= ancho_maximo:
+        if stringWidth(linea_prueba, fuente, tamaño) <= ancho_maximo:
             linea_actual.append(palabra)
+        elif linea_actual:
+            lineas.append(' '.join(linea_actual))
+            linea_actual = [palabra]
         else:
-            if linea_actual:
-                lineas.append(' '.join(linea_actual))
-                linea_actual = [palabra]
-            else:
-                # Si una sola palabra es más ancha que el máximo, agregarla de todos modos
-                lineas.append(palabra)
+            # Si una sola palabra es más ancha que el máximo, agregarla de todos modos
+            lineas.append(palabra)
 
     if linea_actual:
         lineas.append(' '.join(linea_actual))
 
     return lineas if lineas else [texto]
 
-def generar_certificados(plantilla_pdf, datos_excel, configuracion, directorio_salida, nombre_curso):
-    df = pd.read_excel(datos_excel)
 
-    # Verificar si existe la columna 'dni' en el Excel
-    if 'dni' not in df.columns:
-        # Si no existe 'dni', preguntar al usuario qué columna usar
-        columnas_disponibles = list(df.columns)
-
-        # Crear una ventana de diálogo para seleccionar la columna
-        ventana_columna = tk.Toplevel()
-        ventana_columna.title("Seleccionar Columna de Índice")
-        ventana_columna.geometry("400x200")
-        ventana_columna.transient()
-        ventana_columna.grab_set()
-
-        columna_seleccionada = tk.StringVar()
-
-        ttk.Label(ventana_columna, text="No se encontró la columna 'dni'.\nSeleccione una columna para usar como índice:").pack(pady=10)
-
-        combo_columnas = ttk.Combobox(ventana_columna, textvariable=columna_seleccionada, values=columnas_disponibles, width=30)
-        combo_columnas.pack(pady=10)
-        if columnas_disponibles:
-            combo_columnas.set(columnas_disponibles[0])
-
-        def confirmar():
-            ventana_columna.destroy()
-
-        def cancelar():
-            columna_seleccionada.set("")
-            ventana_columna.destroy()
-
-        frame_botones = ttk.Frame(ventana_columna)
-        frame_botones.pack(pady=10)
-        ttk.Button(frame_botones, text="Confirmar", command=confirmar).pack(side=tk.LEFT, padx=5)
-        ttk.Button(frame_botones, text="Cancelar", command=cancelar).pack(side=tk.LEFT, padx=5)
-
-        # Cerrar con la X equivale a cancelar
-        ventana_columna.protocol("WM_DELETE_WINDOW", cancelar)
-
-        # Bloquea hasta que se cierre el diálogo, sin anidar otro mainloop
-        ventana_columna.wait_window()
-
-        if not columna_seleccionada.get():
-            messagebox.showerror("Error", "Debe seleccionar una columna de índice o cargar un archivo Excel con la columna 'dni'.")
-            return
-
-        columna_indice = columna_seleccionada.get()
-    else:
-        columna_indice = 'dni'
-
-    for index, row in df.iterrows():
-        try:
-            # Open the template PDF
-            doc = fitz.open(plantilla_pdf)
-            page = doc[0]  # Assume we're working with the first page
-
-            # Create a new PDF for this certificate
-            output_pdf = fitz.open()
-            output_page = output_pdf.new_page(width=page.rect.width, height=page.rect.height)
-
-            # Copy the content of the template to the new page
-            output_page.show_pdf_page(page.rect, doc, 0)
-
-            # Add text fields
-            for campo, config in configuracion.items():
-                if campo in row:
-                    text = str(row[campo])
-                    font_name = config['fuente']
-                    font_size = config['tamaño']
-                    is_bold = config.get('negrita', False)
-                    is_italic = config.get('cursiva', False)
-                    ancho_maximo = config.get('ancho_maximo', 0)  # 0 significa sin límite
-
-                    match font_name:
-                        case "Times-Roman":
-                            font_name = "tiro"
-                            if is_bold and is_italic:
-                                font_name = "tibi"
-                            elif is_bold:
-                                font_name = "tibo"
-                            elif is_italic:
-                                font_name = "tiit"
-                        case "Helvetica":
-                            font_name = "helv"
-                            if is_bold and is_italic:
-                                font_name = "hebi"
-                            elif is_bold:
-                                font_name = "hebo"
-                            elif is_italic:
-                                font_name = "heit"
-                        case "Courier":
-                            font_name = "courier"
-                            if is_bold and is_italic:
-                                font_name = "cobi"
-                            elif is_bold:
-                                font_name = "cobo"
-                            elif is_italic:
-                                font_name = "coit"
-
-                    # Dividir el texto en múltiples líneas si es necesario
-                    lineas = dividir_texto_en_lineas(text, config['fuente'], config['tamaño'], ancho_maximo)
-
-                    # Calcular la posición Y inicial (ajustada para centrar verticalmente si hay múltiples líneas)
-                    y_base = config['y']
-                    interlineado = config.get('interlineado') or font_size * 1.2  # 0 o ausente = automático
-
-                    # Insertar cada línea
-                    for i, linea in enumerate(lineas):
-                        ancho_linea = stringWidth(linea, config['fuente'], config['tamaño'])
-
-                        if config['alineacion'] == 'Centro':
-                                x = config['x'] - (ancho_linea / 2)
-                        elif config['alineacion'] == 'Derecha':
-                                x = config['x'] - ancho_linea
-                        else:  # 'Izquierda'
-                                x = config['x']
-
-                        y = y_base + (i * interlineado)
-
-                        # Add text to the page
-                        output_page.insert_text((x, y), linea, fontname=font_name, fontsize=font_size)
+def x_inicio(alineacion, x_ref, ancho):
+    """X donde empieza un bloque de ese ancho, según su punto de referencia y alineación."""
+    if alineacion == 'Centro':
+        return x_ref - ancho / 2
+    if alineacion == 'Derecha':
+        return x_ref - ancho
+    return x_ref
 
 
-            # Save the certificate
+def maquetar_campo(texto, config):
+    """Calcula las líneas de un campo y la posición de cada una (Y = línea base)."""
+    fuente_pdf, fuente_rl = resolver_fuente(config['fuente'], config.get('negrita'), config.get('cursiva'))
+    tamaño = config['tamaño']
+    lineas = dividir_texto_en_lineas(texto, fuente_rl, tamaño, config.get('ancho_maximo', 0))
+    interlineado = config.get('interlineado') or tamaño * 1.2  # 0 o ausente = automático
 
-            output_filename = f"{nombre_curso}_{str(row[columna_indice])}.pdf"
-            output_path = os.path.join(directorio_salida, output_filename)
-            output_pdf.save(output_path)
-            output_pdf.close()
+    posiciones = []
+    for i, linea in enumerate(lineas):
+        ancho = stringWidth(linea, fuente_rl, tamaño)
+        x = x_inicio(config['alineacion'], config['x'], ancho)
+        posiciones.append((x, config['y'] + i * interlineado, linea))
 
-        except Exception as e:
-            logging.error(f"Error al generar certificado para {columna_indice} {str(row[columna_indice])}: {str(e)}")
+    return {
+        'fuente_pdf': fuente_pdf,
+        'fuente_rl': fuente_rl,
+        'lineas': lineas,
+        'interlineado': interlineado,
+        'posiciones': posiciones,
+    }
 
-    messagebox.showinfo("Proceso Completado", "Todos los certificados han sido generados.")
-    
-    
-    """_summary_def get_font_name(base_font, is_bold, is_italic):
-    if base_font == "Times-Roman":
-        if is_bold and is_italic:
-            return "Times-BoldItalic" 
-        elif is_bold:
-            return "Times-Bold" 
-        elif is_italic: 
-            return "Times-Italic"
-        else:
-            return "Times-Roman"
-    # Manejar otras fuentes de manera similar
-    # Por ejemplo, para Helvetica:
-    elif base_font == "Helvetica":
-        if is_bold and is_italic:
-            return "Helvetica-BoldOblique"
-        elif is_bold:
-            return "Helvetica-Bold"
-        elif is_italic:
-            return "Helvetica-Oblique"
-        else:
-            return "Helvetica"
-    # Si no es una fuente conocida, devolver la base
-    return base_font
+
+def dibujar_campo(page, maquetado, tamaño):
+    for x, y, linea in maquetado['posiciones']:
+        page.insert_text((x, y), linea, fontname=maquetado['fuente_pdf'], fontsize=tamaño)
+
+
+def generar_certificados(plantilla_pdf, df, configuracion, directorio_salida, nombre_curso,
+                         columna_indice, on_progreso=None):
     """
+    Genera un PDF por fila del DataFrame. No toca la interfaz, así que puede
+    correr en un hilo aparte. Devuelve (cantidad_generados, lista_de_errores).
+    """
+    generados, errores = 0, []
+    total = len(df)
+    prefijo = nombre_archivo_seguro(nombre_curso)
 
-class VistaPreviaAvanzada(ttk.Frame):
-    def __init__(self, master, app=None, *args, **kwargs):
-        super().__init__(master, *args, **kwargs)
-        self.app = app  # Referencia a la aplicación principal
+    with pymupdf.open(plantilla_pdf) as plantilla:  # Se abre una sola vez, no por fila
+        rect = plantilla[0].rect
 
-        # Canvas con proporciones A4 apaisado (842x595 puntos)
-        # Escala 0.70: 842×0.70=590, 595×0.70=417
-        self.canvas = tk.Canvas(self, width=600, height=430, bg='white')
-        self.canvas.pack(fill=tk.BOTH, expand=True)
+        for n, (_, row) in enumerate(df.iterrows(), start=1):
+            identificador = valor_texto(row[columna_indice]) if columna_indice in row else str(n)
+            try:
+                salida = pymupdf.open()
+                page = salida.new_page(width=rect.width, height=rect.height)
+                page.show_pdf_page(rect, plantilla, 0)
 
-        # Variables para interactividad
-        self.pdf_image = None  # Imagen del PDF de fondo
-        self.pdf_width = 0  # Ancho real del PDF en puntos
-        self.pdf_height = 0  # Alto real del PDF en puntos
-        self.scale = 1.0  # Escala del PDF mostrado
-        self.offset_x = 0  # Offset X para centrar la imagen
-        self.offset_y = 0  # Offset Y para centrar la imagen
-        self.campos_rect = {}  # Diccionario de recuadros por campo
-        self.campo_seleccionado = None  # Campo actualmente seleccionado
-        self.drag_data = {"x": 0, "y": 0, "item": None, "mode": None}  # Datos para arrastre
+                for campo, config in configuracion.items():
+                    if campo in row:
+                        dibujar_campo(page, maquetar_campo(valor_texto(row[campo]), config), config['tamaño'])
 
-        # Eventos del canvas
-        self.canvas.bind("<Button-1>", self.on_canvas_click)
-        self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
-        self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
+                nombre = f"{prefijo}_{nombre_archivo_seguro(identificador)}.pdf"
+                salida.save(os.path.join(directorio_salida, nombre))
+                salida.close()
+                generados += 1
+            except Exception as e:
+                errores.append(f"{columna_indice} {identificador}: {e}")
+                logging.error(f"Error al generar certificado para {columna_indice} {identificador}: {e}")
 
-    def actualizar_vista_previa(self, plantilla_pdf, campos, nombre_curso, datos_registro=None):
-        try:
-            # Open the PDF
-            doc = fitz.open(plantilla_pdf)
-            page = doc[0]  # Get the first page
+            if on_progreso:
+                on_progreso(n, total)
 
-            # Guardar dimensiones reales del PDF
-            self.pdf_width = page.rect.width
-            self.pdf_height = page.rect.height
+    return generados, errores
 
-            # Create a new PDF with the fields
-            output_pdf = fitz.open()
-            output_page = output_pdf.new_page(width=self.pdf_width, height=self.pdf_height)
 
-            # Copy the content of the template to the new page
-            output_page.show_pdf_page(page.rect, doc, 0)
+def _numero(texto, por_defecto=0.0):
+    try:
+        return float(str(texto).replace(',', '.'))
+    except ValueError:
+        return por_defecto
 
-            # Limpiar campos anteriores
+
+def _formatear(valor):
+    """600.0 -> '600'; 12.5 -> '12.5'."""
+    numero = _numero(valor)
+    return str(int(numero)) if numero.is_integer() else str(numero)
+
+
+# ---------------------------------------------------------------------------
+# Interfaz
+# ---------------------------------------------------------------------------
+
+class VistaPrevia(ctk.CTkFrame):
+    """
+    Muestra la plantilla con los campos dibujados y permite moverlos,
+    cambiarles el ancho y ajustarlos con las flechas.
+    No conoce a la aplicación: avisa los cambios mediante callbacks.
+    """
+    HANDLE = 6  # Medio lado del tirador de redimensionado, en píxeles
+
+    def __init__(self, master, on_mover, on_redimensionar, on_seleccionar, **kwargs):
+        super().__init__(master, **kwargs)
+        self.on_mover = on_mover
+        self.on_redimensionar = on_redimensionar
+        self.on_seleccionar = on_seleccionar
+
+        self.canvas = tk.Canvas(self, highlightthickness=0, bd=0)
+        self.canvas.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self._aplicar_fondo()
+
+        self.photo = None
+        self.pdf_w = self.pdf_h = 0
+        self.scale = 1.0
+        self.offset_x = self.offset_y = 0
+        self.campos_rect = {}
+        self.seleccionado = None
+        self.drag = None
+        self.bloqueada = False  # True mientras se generan certificados (PyMuPDF no es thread-safe)
+        self._args_render = None
+        self._mensaje = None
+        self._resize_after = None
+        self._tamano_canvas = (0, 0)
+
+        self.canvas.bind("<Button-1>", self._on_click)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<Motion>", self._on_motion)
+        self.canvas.bind("<Configure>", self._on_configure)
+        for tecla, (dx, dy) in {"<Left>": (-1, 0), "<Right>": (1, 0), "<Up>": (0, -1), "<Down>": (0, 1)}.items():
+            self.canvas.bind(tecla, lambda e, dx=dx, dy=dy: self._on_tecla(e, dx, dy))
+
+    # --- Tema -------------------------------------------------------------
+
+    def _set_appearance_mode(self, mode_string):
+        super()._set_appearance_mode(mode_string)
+        self._aplicar_fondo()
+
+    def _aplicar_fondo(self):
+        if hasattr(self, 'canvas'):
+            self.canvas.configure(bg=self._apply_appearance_mode(FONDO_CANVAS))
+
+    # --- Render -------------------------------------------------------------
+
+    def mostrar_mensaje(self, texto):
+        self._args_render = None
+        self._mensaje = texto
+        self.campos_rect = {}
+        self.canvas.delete("all")
+        w, h = self.canvas.winfo_width(), self.canvas.winfo_height()
+        self.canvas.create_text(w / 2, h / 2, text=texto, fill='gray55', font=('Segoe UI', 12), justify='center')
+
+    def renderizar(self, plantilla_pdf, campos, datos_registro=None):
+        if self.bloqueada:
+            return
+        self._args_render = (plantilla_pdf, campos, datos_registro)
+        self._mensaje = None
+
+        cw = max(self.canvas.winfo_width(), 100)
+        ch = max(self.canvas.winfo_height(), 100)
+        margen = 24
+
+        with pymupdf.open(plantilla_pdf) as doc:
+            rect = doc[0].rect
+            self.pdf_w, self.pdf_h = rect.width, rect.height
+            self.scale = max(min((cw - margen) / self.pdf_w, (ch - margen) / self.pdf_h), 0.05)
+
+            salida = pymupdf.open()
+            page = salida.new_page(width=self.pdf_w, height=self.pdf_h)
+            page.show_pdf_page(rect, doc, 0)
+
             self.campos_rect = {}
-
-            # Add text fields
             for campo, config in campos.items():
-                # Obtener texto del Excel o del campo texto_muestra
                 if datos_registro is not None and campo in datos_registro:
-                    text = str(datos_registro[campo])
+                    texto = valor_texto(datos_registro[campo])
                 else:
-                    text = config.get('texto_muestra', campo)
+                    texto = config.get('texto_muestra') or campo
+                maquetado = maquetar_campo(texto, config)
+                dibujar_campo(page, maquetado, config['tamaño'])
+                self.campos_rect[campo] = self._rect_de(config, maquetado)
 
-                font_name = config['fuente']
-                font_size = config['tamaño']
-                is_bold = config.get('negrita', False)
-                is_italic = config.get('cursiva', False)
-                ancho_maximo = config.get('ancho_maximo', 0)
+            # Renderizar directo a la escala final: más nítido y rápido que achicar después
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(self.scale, self.scale))
+            salida.close()
 
-                # Convertir nombre de fuente para PyMuPDF
-                font_name_pdf = font_name
-                match font_name:
-                    case "Times-Roman":
-                        font_name_pdf = "tiro"
-                        if is_bold and is_italic:
-                            font_name_pdf = "tibi"
-                        elif is_bold:
-                            font_name_pdf = "tibo"
-                        elif is_italic:
-                            font_name_pdf = "tiit"
-                    case "Helvetica":
-                        font_name_pdf = "helv"
-                        if is_bold and is_italic:
-                            font_name_pdf = "hebi"
-                        elif is_bold:
-                            font_name_pdf = "hebo"
-                        elif is_italic:
-                            font_name_pdf = "heit"
-                    case "Courier":
-                        font_name_pdf = "courier"
-                        if is_bold and is_italic:
-                            font_name_pdf = "cobi"
-                        elif is_bold:
-                            font_name_pdf = "cobo"
-                        elif is_italic:
-                            font_name_pdf = "coit"
+        img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        self.offset_x = (cw - pix.width) // 2
+        self.offset_y = (ch - pix.height) // 2
+        self.photo = ImageTk.PhotoImage(img)
 
-                # Dividir el texto en múltiples líneas si es necesario
-                lineas = dividir_texto_en_lineas(text, font_name, font_size, ancho_maximo)
+        if self.seleccionado not in self.campos_rect:
+            self.seleccionado = None
 
-                # Calcular la posición Y inicial
-                y_base = config['y']
-                interlineado = config.get('interlineado') or font_size * 1.2  # 0 o ausente = automático
-
-                # Calcular dimensiones del recuadro
-                max_ancho = max([stringWidth(linea, font_name, font_size) for linea in lineas]) if lineas else 0
-                # Altura: desde la primera línea hasta el final de la última línea
-                # Si hay N líneas, la última está en (N-1)*interlineado + altura de una línea
-                altura_total = ((len(lineas) - 1) * interlineado + font_size) if lineas else font_size
-
-                # Calcular la posición X donde realmente empieza el recuadro según la alineación
-                # Usar el ancho máximo configurado si existe, sino el ancho real del texto
-                ancho_rect = ancho_maximo if ancho_maximo > 0 else max_ancho
-
-                if config['alineacion'] == 'Centro':
-                    x_inicio_rect = config['x'] - (ancho_rect / 2)
-                elif config['alineacion'] == 'Derecha':
-                    x_inicio_rect = config['x'] - ancho_rect
-                else:  # 'Izquierda'
-                    x_inicio_rect = config['x']
-
-                # PyMuPDF usa Y como baseline del texto, no como top
-                # El recuadro debe empezar más arriba: baseline - ascent
-                # Típicamente ascent es ~0.75-0.8 del font_size
-                y_top_rect = y_base - (font_size * 0.75)
-
-                # Guardar información del recuadro para este campo
-                self.campos_rect[campo] = {
-                    'x_ref': config['x'],  # Punto de referencia (centro, derecha o izquierda según alineación)
-                    'x_inicio': x_inicio_rect,  # Donde realmente empieza el recuadro
-                    'y': y_top_rect,  # Parte superior del recuadro (ajustado desde baseline)
-                    'y_baseline': y_base,  # Guardar también el baseline para referencia
-                    'ancho': ancho_rect,
-                    'altura': altura_total,
-                    'config': config,
-                    'texto': text,
-                    'lineas': lineas,  # Guardar las líneas para referencia
-                    'font_size': font_size  # Guardar font_size para recalcular
-                }
-
-                # Insertar cada línea en el PDF
-                for i, linea in enumerate(lineas):
-                    ancho_linea = stringWidth(linea, font_name, font_size)
-
-                    if config['alineacion'] == 'Centro':
-                        x = config['x'] - (ancho_linea / 2)
-                    elif config['alineacion'] == 'Derecha':
-                        x = config['x'] - ancho_linea
-                    else:  # 'Izquierda'
-                        x = config['x']
-
-                    y = y_base + (i * interlineado)
-
-                    # Add text to the page
-                    output_page.insert_text((x, y), linea, fontname=font_name_pdf, fontsize=font_size)
-
-            # Convert PDF to image sin escalar (matriz identidad)
-            pix = output_page.get_pixmap()
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-
-            # Calculate scale to fit canvas (basada en dimensiones REALES del PDF)
-            canvas_width = self.canvas.winfo_width() if self.canvas.winfo_width() > 1 else 600
-            canvas_height = self.canvas.winfo_height() if self.canvas.winfo_height() > 1 else 430
-
-            scale_x = canvas_width / self.pdf_width
-            scale_y = canvas_height / self.pdf_height
-            self.scale = min(scale_x, scale_y)  # Usar la menor escala para que entre completo
-
-            # Tamaño de la imagen escalada
-            new_width = int(self.pdf_width * self.scale)
-            new_height = int(self.pdf_height * self.scale)
-            img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-
-            # Calcular offset para centrar la imagen
-            self.offset_x = (canvas_width - new_width) // 2
-            self.offset_y = (canvas_height - new_height) // 2
-
-            # Display in canvas centrado
-            self.photo = ImageTk.PhotoImage(img)
-            self.canvas.delete("all")
-            self.canvas.create_image(self.offset_x, self.offset_y, anchor="nw", image=self.photo)
-
-            # Dibujar recuadros sobre los campos
-            self.dibujar_recuadros()
-
-            output_pdf.close()
-            doc.close()
-
-        except Exception as e:
-            print(f"Error updating preview: {e}")
-            import traceback
-            traceback.print_exc()
-
-    def dibujar_recuadros(self):
-        """Dibuja los recuadros interactivos sobre cada campo"""
-        # Borrar todos los recuadros anteriores para evitar estela
-        self.canvas.delete("recuadro")
-        self.canvas.delete("handle")
-
-        for campo, rect_info in self.campos_rect.items():
-            # Convertir coordenadas del PDF a coordenadas del canvas (con escala y offset)
-            x1 = (rect_info['x_inicio'] * self.scale) + self.offset_x
-            y1 = (rect_info['y'] * self.scale) + self.offset_y
-            ancho = rect_info['ancho'] * self.scale
-            altura = rect_info['altura'] * self.scale
-
-            x2 = x1 + ancho
-            y2 = y1 + altura
-
-            # Color del recuadro (azul normal, verde seleccionado)
-            color = '#00ff00' if campo == self.campo_seleccionado else '#0080ff'
-
-            # Dibujar recuadro principal (usando tags genéricos para poder borrar)
-            rect_id = self.canvas.create_rectangle(x1, y1, x2, y2, outline=color, width=2, tags=("recuadro", f"rect_{campo}"))
-
-            # Dibujar handles de redimensionamiento en las esquinas
-            handle_size = 6
-            # Esquina inferior derecha (para redimensionar ancho)
-            handle_id = self.canvas.create_rectangle(
-                x2 - handle_size, y2 - handle_size, x2 + handle_size, y2 + handle_size,
-                fill=color, outline=color, tags=("handle", f"handle_{campo}")
-            )
-
-            # Guardar IDs de los elementos del canvas
-            rect_info['rect_id'] = rect_id
-            rect_info['handle_id'] = handle_id
-
-    def on_canvas_click(self, event):
-        """Maneja el clic en el canvas"""
-        # Buscar si se hizo clic en un handle
-        for campo, rect_info in self.campos_rect.items():
-            handle_id = rect_info.get('handle_id')
-            if handle_id and 'current' in self.canvas.gettags(handle_id):
-                items = self.canvas.find_overlapping(event.x - 5, event.y - 5, event.x + 5, event.y + 5)
-                if handle_id in items:
-                    self.campo_seleccionado = campo
-                    self.drag_data = {"x": event.x, "y": event.y, "item": handle_id, "mode": "resize", "campo": campo}
-                    self.dibujar_recuadros()  # Redibujar para resaltar
-                    return
-
-        # Buscar si se hizo clic en un recuadro
-        for campo, rect_info in self.campos_rect.items():
-            rect_id = rect_info.get('rect_id')
-            if rect_id:
-                items = self.canvas.find_overlapping(event.x, event.y, event.x, event.y)
-                if rect_id in items:
-                    self.campo_seleccionado = campo
-                    self.drag_data = {"x": event.x, "y": event.y, "item": rect_id, "mode": "move", "campo": campo}
-                    self.dibujar_recuadros()  # Redibujar para resaltar
-                    return
-
-        # Si no se hizo clic en ningún recuadro, deseleccionar
-        self.campo_seleccionado = None
+        self.canvas.delete("all")
+        self.canvas.create_rectangle(self.offset_x + 3, self.offset_y + 3,
+                                     self.offset_x + pix.width + 3, self.offset_y + pix.height + 3,
+                                     fill=self._apply_appearance_mode(SOMBRA_PAGINA), outline='')
+        self.canvas.create_image(self.offset_x, self.offset_y, anchor="nw", image=self.photo)
         self.dibujar_recuadros()
 
-    def on_canvas_drag(self, event):
-        """Maneja el arrastre en el canvas"""
-        if self.drag_data["mode"] == "move":
-            # Mover el campo (convertir delta de canvas a coordenadas PDF)
-            dx = (event.x - self.drag_data["x"]) / self.scale
-            dy = (event.y - self.drag_data["y"]) / self.scale
+    @staticmethod
+    def _rect_de(config, maquetado):
+        tamaño = config['tamaño']
+        lineas = maquetado['lineas']
+        ancho_texto = max((stringWidth(l, maquetado['fuente_rl'], tamaño) for l in lineas), default=0)
+        return {
+            'x_ref': config['x'],
+            'y_base': config['y'],
+            'ancho': config.get('ancho_maximo') or ancho_texto,
+            'altura': (len(lineas) - 1) * maquetado['interlineado'] + tamaño,
+            'tamaño': tamaño,
+            'alineacion': config['alineacion'],
+        }
 
-            campo = self.drag_data["campo"]
-            rect_info = self.campos_rect[campo]
-            config = rect_info['config']
+    def dibujar_recuadros(self):
+        self.canvas.delete("overlay")
+        s, h = self.scale, self.HANDLE
+        for campo, r in self.campos_rect.items():
+            # PyMuPDF usa Y como línea base; el ascendente es ~0.75 del tamaño
+            x1 = x_inicio(r['alineacion'], r['x_ref'], r['ancho']) * s + self.offset_x
+            y1 = (r['y_base'] - 0.75 * r['tamaño']) * s + self.offset_y
+            x2 = x1 + r['ancho'] * s
+            y2 = y1 + r['altura'] * s
+            r['bbox'] = (x1, y1, x2, y2)
+            # El tirador va en el borde que se puede mover según la alineación
+            r['handle'] = (x1 if r['alineacion'] == 'Derecha' else x2, y2)
 
-            # Actualizar el punto de referencia (en coordenadas PDF)
-            rect_info['x_ref'] += dx
-            rect_info['y'] += dy  # y es la parte superior del recuadro
-            rect_info['y_baseline'] += dy  # También actualizar el baseline
+            seleccionado = campo == self.seleccionado
+            color = COLOR_SELECCION if seleccionado else COLOR_CAMPO
+            self.canvas.create_rectangle(x1, y1, x2, y2, outline=color, width=2 if seleccionado else 1,
+                                         dash=() if seleccionado else (4, 2), tags="overlay")
+            self.canvas.create_text(x1, y1 - 2, anchor='sw', text=campo, fill=color,
+                                    font=('Segoe UI', 9, 'bold'), tags="overlay")
+            hx, hy = r['handle']
+            self.canvas.create_rectangle(hx - h, hy - h, hx + h, hy + h, fill=color, outline='white', tags="overlay")
 
-            # Recalcular x_inicio según alineación
-            if config['alineacion'] == 'Centro':
-                rect_info['x_inicio'] = rect_info['x_ref'] - (rect_info['ancho'] / 2)
-            elif config['alineacion'] == 'Derecha':
-                rect_info['x_inicio'] = rect_info['x_ref'] - rect_info['ancho']
-            else:  # 'Izquierda'
-                rect_info['x_inicio'] = rect_info['x_ref']
+    # --- Interacción ------------------------------------------------------
 
-            self.drag_data["x"] = event.x
-            self.drag_data["y"] = event.y
+    def _hit(self, x, y):
+        """Devuelve (campo, 'resize'|'move') bajo el cursor. Prioriza el campo seleccionado."""
+        orden = sorted(self.campos_rect, key=lambda c: c != self.seleccionado)
+        tolerancia = self.HANDLE + 2
+        for campo in orden:
+            hx, hy = self.campos_rect[campo].get('handle', (None, None))
+            if hx is not None and abs(x - hx) <= tolerancia and abs(y - hy) <= tolerancia:
+                return campo, 'resize'
+        for campo in orden:
+            bbox = self.campos_rect[campo].get('bbox')
+            if bbox and bbox[0] - 3 <= x <= bbox[2] + 3 and bbox[1] - 3 <= y <= bbox[3] + 3:
+                return campo, 'move'
+        return None, None
 
-            # Redibujar
-            self.dibujar_recuadros()
+    def _seleccionar(self, campo):
+        self.seleccionado = campo
+        self.on_seleccionar(campo)
+        self.dibujar_recuadros()
 
-        elif self.drag_data["mode"] == "resize":
-            # Redimensionar el ancho del campo (convertir delta de canvas a coordenadas PDF)
-            dx = (event.x - self.drag_data["x"]) / self.scale
+    def _on_click(self, event):
+        self.canvas.focus_set()  # Para recibir las flechas
+        campo, modo = self._hit(event.x, event.y)
+        self.drag = {'campo': campo, 'modo': modo, 'x': event.x, 'y': event.y, 'cambio': False} if campo else None
+        self._seleccionar(campo)
 
-            campo = self.drag_data["campo"]
-            rect_info = self.campos_rect[campo]
-            config = rect_info['config']
-
-            # Calcular nuevo ancho (en coordenadas PDF)
-            nuevo_ancho = rect_info['ancho'] + dx
-
-            if nuevo_ancho > 10:  # Ancho mínimo
-                rect_info['ancho'] = nuevo_ancho
-
-                # Recalcular x_inicio según alineación (importante para Centro y Derecha)
-                if config['alineacion'] == 'Centro':
-                    rect_info['x_inicio'] = rect_info['x_ref'] - (nuevo_ancho / 2)
-                elif config['alineacion'] == 'Derecha':
-                    rect_info['x_inicio'] = rect_info['x_ref'] - nuevo_ancho
-                else:  # 'Izquierda'
-                    rect_info['x_inicio'] = rect_info['x_ref']
-
-                self.drag_data["x"] = event.x
-
-                # Redibujar
-                self.dibujar_recuadros()
-
-    def on_canvas_release(self, event):
-        """Maneja cuando se suelta el mouse"""
-        if self.drag_data["mode"] in ["move", "resize"] and self.app:
-            campo = self.drag_data["campo"]
-            rect_info = self.campos_rect[campo]
-
-            # Actualizar los valores en la configuración de la aplicación
-            if self.drag_data["mode"] == "move":
-                # Actualizar X (punto de referencia) e Y (baseline, no top)
-                self.actualizar_campo_en_ui(campo, 'x', int(rect_info['x_ref']))
-                self.actualizar_campo_en_ui(campo, 'y', int(rect_info['y_baseline']))
-
-            elif self.drag_data["mode"] == "resize":
-                # Actualizar ancho_maximo
-                self.actualizar_campo_en_ui(campo, 'ancho_maximo', int(rect_info['ancho']))
-
-            # Actualizar la vista previa para mostrar el texto en la nueva posición
-            self.app.actualizar_vista_previa()
-
-        # Limpiar datos de arrastre
-        self.drag_data = {"x": 0, "y": 0, "item": None, "mode": None}
-
-    def actualizar_campo_en_ui(self, campo_nombre, propiedad, valor):
-        """Actualiza un campo en la interfaz de usuario"""
-        if not self.app:
+    def _on_drag(self, event):
+        if not self.drag:
             return
+        r = self.campos_rect[self.drag['campo']]
+        dx = (event.x - self.drag['x']) / self.scale
+        dy = (event.y - self.drag['y']) / self.scale
 
-        # Buscar el frame del campo en la configuración
-        for frame in self.app.campos_frame.winfo_children():
-            entries = [widget for widget in frame.winfo_children() if isinstance(widget, (ttk.Entry, ttk.Combobox))]
-            if len(entries) >= 9:
-                campo_entry = entries[0]
-                if campo_entry.get() == campo_nombre:
-                    # Encontramos el campo correcto, usar StringVar
-                    if propiedad == 'x':
-                        frame.x_var.set(str(valor))
-                    elif propiedad == 'y':
-                        frame.y_var.set(str(valor))
-                    elif propiedad == 'ancho_maximo':
-                        frame.ancho_maximo_var.set(str(valor))
-                    break
+        if self.drag['modo'] == 'move':
+            r['x_ref'] += dx
+            r['y_base'] += dy
+        else:
+            # Centro crece hacia ambos lados; Derecha tiene el tirador a la izquierda
+            factor = {'Centro': 2, 'Derecha': -1}.get(r['alineacion'], 1)
+            r['ancho'] = max(10, r['ancho'] + factor * dx)
 
-class Application(tk.Frame):
-    def __init__(self, master=None):
-        super().__init__(master)
-        self.master = master
-        self.master.title("Generador de Certificados")
-        self.pack(fill=tk.BOTH, expand=True)
+        self.drag.update(x=event.x, y=event.y, cambio=True)
+        self.dibujar_recuadros()
+
+    def _on_release(self, event):
+        if self.drag and self.drag['cambio']:
+            campo = self.drag['campo']
+            r = self.campos_rect[campo]
+            if self.drag['modo'] == 'move':
+                self.on_mover(campo, r['x_ref'], r['y_base'])
+            else:
+                self.on_redimensionar(campo, r['ancho'])
+        self.drag = None
+
+    def _on_motion(self, event):
+        if self.drag:
+            return
+        _, modo = self._hit(event.x, event.y)
+        self.canvas.configure(cursor={'resize': 'sb_h_double_arrow', 'move': 'fleur'}.get(modo, ''))
+
+    def _on_tecla(self, event, dx, dy):
+        if not self.seleccionado:
+            return None
+        paso = 10 if event.state & 0x0001 else 1  # Shift = pasos de 10 pt
+        r = self.campos_rect[self.seleccionado]
+        r['x_ref'] += dx * paso
+        r['y_base'] += dy * paso
+        self.dibujar_recuadros()
+        self.on_mover(self.seleccionado, r['x_ref'], r['y_base'])
+        return "break"
+
+    def _on_configure(self, event):
+        tamano = (event.width, event.height)
+        if tamano == self._tamano_canvas:
+            return
+        self._tamano_canvas = tamano
+        if self._resize_after:
+            self.after_cancel(self._resize_after)
+        self._resize_after = self.after(150, self._rerender)
+
+    def _rerender(self):
+        self._resize_after = None
+        if self._args_render:
+            try:
+                self.renderizar(*self._args_render)
+            except Exception as e:
+                logging.error(f"Error al redibujar la vista previa: {e}")
+        elif self._mensaje:
+            self.mostrar_mensaje(self._mensaje)
+
+
+class CampoCard(ctk.CTkFrame):
+    """Tarjeta con la configuración de un campo. Guarda sus propias variables."""
+
+    def __init__(self, master, columnas, on_cambio, on_eliminar, valores=None):
+        super().__init__(master, corner_radius=10, border_width=2, border_color=BORDE_TARJETA)
+        v = {**CAMPO_POR_DEFECTO, **(valores or {})}
+
+        self.var_nombre = tk.StringVar(value=v['nombre'])
+        self.var_muestra = tk.StringVar(value=v['texto_muestra'])
+        self.var_x = tk.StringVar(value=_formatear(v['x']))
+        self.var_y = tk.StringVar(value=_formatear(v['y']))
+        self.var_fuente = tk.StringVar(value=v['fuente'])
+        self.var_tamano = tk.StringVar(value=_formatear(v['tamaño']))
+        self.var_alineacion = tk.StringVar(value=v['alineacion'])
+        self.var_negrita = tk.BooleanVar(value=v['negrita'])
+        self.var_cursiva = tk.BooleanVar(value=v['cursiva'])
+        self.var_ancho = tk.StringVar(value=_formatear(v['ancho_maximo']))
+        self.var_interlineado = tk.StringVar(value=_formatear(v['interlineado']))
+
+        self.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform='col')
+        pad = {'padx': 6, 'pady': 3}
+        chico = ctk.CTkFont(size=11)
+
+        # Fila 0: columna del Excel + eliminar
+        self.combo_nombre = ctk.CTkComboBox(self, values=columnas, variable=self.var_nombre,
+                                            font=ctk.CTkFont(weight='bold'))
+        self.combo_nombre.grid(row=0, column=0, columnspan=3, sticky='ew', padx=(10, 6), pady=(10, 3))
+        ctk.CTkButton(self, text="✕", width=30, fg_color='transparent', text_color=('gray30', 'gray70'),
+                      hover_color=('#fecaca', '#7f1d1d'), command=lambda: on_eliminar(self)
+                      ).grid(row=0, column=3, sticky='e', padx=(6, 10), pady=(10, 3))
+
+        # Fila 1: texto de muestra
+        ctk.CTkLabel(self, text="Texto de muestra (si la columna no está en el Excel)", font=chico,
+                     text_color=('gray40', 'gray60')).grid(row=1, column=0, columnspan=4, sticky='w', padx=10)
+        ctk.CTkEntry(self, textvariable=self.var_muestra).grid(row=2, column=0, columnspan=4, sticky='ew',
+                                                               padx=10, pady=(0, 3))
+
+        # Fila 2: fuente, tamaño, estilo
+        ctk.CTkOptionMenu(self, values=FUENTES, variable=self.var_fuente).grid(
+            row=3, column=0, columnspan=2, sticky='ew', padx=(10, 6), pady=3)
+        ctk.CTkComboBox(self, values=TAMANOS, variable=self.var_tamano).grid(row=3, column=2, sticky='ew', **pad)
+        estilo = ctk.CTkFrame(self, fg_color='transparent')
+        estilo.grid(row=3, column=3, sticky='ew', padx=(6, 10), pady=3)
+        ctk.CTkCheckBox(estilo, text="N", width=20, checkbox_width=20, checkbox_height=20,
+                        font=ctk.CTkFont(weight='bold'), variable=self.var_negrita,
+                        onvalue=True, offvalue=False).pack(side='left', padx=(0, 6))
+        ctk.CTkCheckBox(estilo, text="C", width=20, checkbox_width=20, checkbox_height=20,
+                        font=ctk.CTkFont(slant='italic'), variable=self.var_cursiva,
+                        onvalue=True, offvalue=False).pack(side='left')
+
+        # Fila 3: alineación
+        ctk.CTkSegmentedButton(self, values=ALINEACIONES, variable=self.var_alineacion).grid(
+            row=4, column=0, columnspan=4, sticky='ew', padx=10, pady=3)
+
+        # Fila 4: posición y tamaño del bloque
+        etiquetas = ["X", "Y", "Ancho (0 = libre)", "Interl. (0 = auto)"]
+        variables = [self.var_x, self.var_y, self.var_ancho, self.var_interlineado]
+        for col, (texto, var) in enumerate(zip(etiquetas, variables)):
+            px = (10 if col == 0 else 6, 10 if col == 3 else 6)
+            ctk.CTkLabel(self, text=texto, font=chico, text_color=('gray40', 'gray60')).grid(
+                row=5, column=col, sticky='w', padx=px)
+            ctk.CTkEntry(self, textvariable=var, justify='center').grid(
+                row=6, column=col, sticky='ew', padx=px, pady=(0, 10))
+
+        for var in (self.var_nombre, self.var_muestra, self.var_x, self.var_y, self.var_fuente,
+                    self.var_tamano, self.var_alineacion, self.var_negrita, self.var_cursiva,
+                    self.var_ancho, self.var_interlineado):
+            var.trace_add('write', lambda *_: on_cambio())
+
+    def nombre(self):
+        return self.var_nombre.get().strip()
+
+    def get_config(self):
+        return {
+            'texto_muestra': self.var_muestra.get(),
+            'x': int(round(_numero(self.var_x.get()))),
+            'y': int(round(_numero(self.var_y.get()))),
+            'fuente': self.var_fuente.get(),
+            'tamaño': max(1, int(round(_numero(self.var_tamano.get(), 20)))),
+            'alineacion': self.var_alineacion.get(),
+            'negrita': self.var_negrita.get(),
+            'cursiva': self.var_cursiva.get(),
+            'ancho_maximo': max(0.0, _numero(self.var_ancho.get())),
+            'interlineado': max(0.0, _numero(self.var_interlineado.get())),
+        }
+
+    def set_columnas(self, columnas):
+        self.combo_nombre.configure(values=columnas)
+
+    def set_posicion(self, x, y):
+        self.var_x.set(str(int(round(x))))
+        self.var_y.set(str(int(round(y))))
+
+    def set_ancho(self, ancho):
+        self.var_ancho.set(str(int(round(ancho))))
+
+    def set_seleccionado(self, seleccionado):
+        self.configure(border_color=COLOR_SELECCION if seleccionado else BORDE_TARJETA)
+
+
+class Application(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("Generador de Certificados")
+        self.geometry("1366x768")
+        self.minsize(1100, 650)
+        self._configurar_icono()
+
+        self.df_excel = None
         self.excel_columns = []
-        self.df_excel = None  # DataFrame del Excel cargado
-        self.registro_actual = 0  # Índice del registro actual en la vista previa
-        self.create_widgets()
-        self.campo_config = {}
-        self.cargar_config('ultima_config.json')  # Cargar la última configuración al iniciar
-        # print(self.datos_entry.get())
-        if self.datos_entry.get() != '':
-            filename = self.datos_entry.get()
-            self.cargar_columnas_excel(filename)
+        self.registro_actual = 0
+        self.cards = []
+        self._preview_after = None
+        self._generando = False
+        self._cola = queue.Queue()
 
+        self.var_plantilla = tk.StringVar()
+        self.var_datos = tk.StringVar()
+        self.var_curso = tk.StringVar()
+        self.var_salida = tk.StringVar()
+        self.var_plantilla.trace_add('write', lambda *_: self.programar_vista_previa())
 
-    def create_widgets(self):
-        # Frame principal
-        main_frame = ttk.Frame(self, padding="10 10 10 10")
-        main_frame.grid(column=0, row=0, sticky=(tk.N, tk.W, tk.E, tk.S)) # type: ignore
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
+        self._crear_widgets()
+        self.cargar_config(CONFIG_ULTIMA, silencioso=True)
+        if not self.cards:
+            self.agregar_campo()
 
-        # Plantilla PDF
-        ttk.Label(main_frame, text="Plantilla PDF:").grid(column=0, row=0, sticky=tk.W)
-        self.plantilla_entry = ttk.Entry(main_frame, width=50)
-        self.plantilla_entry.grid(column=1, row=0, sticky=(tk.W, tk.E))
-        ttk.Button(main_frame, text="Buscar", command=self.buscar_plantilla).grid(column=2, row=0)
+    def _configurar_icono(self):
+        # CustomTkinter pone su propio ícono con iconbitmap salvo que ya se haya llamado,
+        # por eso se usa iconbitmap con un .ico generado desde el .png (iconphoto no alcanza).
+        try:
+            ico = os.path.join(tempfile.gettempdir(), 'certificado_icono.ico')
+            Image.open(ruta_recurso(ICONO)).save(ico, sizes=[(16, 16), (32, 32), (48, 48), (64, 64)])
+            self.iconbitmap(ico)
+        except Exception as e:
+            logging.warning(f"No se pudo cargar el icono: {e}")
 
-        # Datos Excel
-        ttk.Label(main_frame, text="Datos Excel:").grid(column=0, row=1, sticky=tk.W)
-        self.datos_entry = ttk.Entry(main_frame, width=50)
-        self.datos_entry.grid(column=1, row=1, sticky=(tk.W, tk.E))
-        ttk.Button(main_frame, text="Buscar", command=self.buscar_datos).grid(column=2, row=1)
+    # --- Construcción de la interfaz ---------------------------------------
 
-        # Nombre del Curso
-        ttk.Label(main_frame, text="Nombre del Curso:").grid(column=0, row=2, sticky=tk.W)
-        self.curso_entry = ttk.Entry(main_frame, width=50)
-        self.curso_entry.grid(column=1, row=2, sticky=(tk.W, tk.E))
+    def _crear_widgets(self):
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
 
-        # Directorio de Salida
-        ttk.Label(main_frame, text="Directorio de Salida:").grid(column=0, row=3, sticky=tk.W)
-        self.salida_entry = ttk.Entry(main_frame, width=50)
-        self.salida_entry.grid(column=1, row=3, sticky=(tk.W, tk.E))
-        ttk.Button(main_frame, text="Buscar", command=self.buscar_salida).grid(column=2, row=3)
+        self._crear_panel_lateral()
+        self._crear_panel_vista_previa()
 
-        # Configuración de campos
-        ttk.Label(main_frame, text="Configuración de Campos:").grid(column=0, row=4, sticky=tk.W, columnspan=3)
-        self.campos_frame = ttk.Frame(main_frame)
-        self.campos_frame.grid(column=0, row=5, columnspan=3, sticky=(tk.W, tk.E))
-        self.agregar_campo()
+    def _boton_secundario(self, master, **kwargs):
+        return ctk.CTkButton(master, fg_color='transparent', border_width=1,
+                             border_color=('gray60', 'gray40'), text_color=('gray10', 'gray90'),
+                             hover_color=('gray85', 'gray25'), **kwargs)
 
-        # Botones
-        ttk.Button(main_frame, text="Agregar Campo", command=self.agregar_campo).grid(column=0, row=6)
-        ttk.Button(main_frame, text="Generar Certificados", command=self.generar).grid(column=1, row=6)
-        ttk.Button(main_frame, text="Guardar Configuración", command=self.guardar_config).grid(column=2, row=6)
-        ttk.Button(main_frame, text="Cargar Configuración", command=self.cargar_config).grid(column=0, row=7)
-        
+    def _crear_panel_lateral(self):
+        lateral = ctk.CTkFrame(self, corner_radius=0)
+        lateral.grid(row=0, column=0, sticky='nsew')
+        lateral.grid_columnconfigure(0, weight=1)
+        lateral.grid_rowconfigure(3, weight=1)
 
-        # Vista previa y navegador
-        preview_frame = ttk.Frame(main_frame)
-        preview_frame.grid(column=3, row=0, rowspan=15, padx=10, pady=10, sticky=(tk.N, tk.S, tk.E, tk.W))
+        # Encabezado
+        encabezado = ctk.CTkFrame(lateral, fg_color='transparent')
+        encabezado.grid(row=0, column=0, sticky='ew', padx=16, pady=(16, 8))
+        encabezado.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(encabezado, text="Generador de Certificados",
+                     font=ctk.CTkFont(size=20, weight='bold')).grid(row=0, column=0, sticky='w')
+        modos = {"Sistema": "system", "Claro": "light", "Oscuro": "dark"}
+        tema = ctk.CTkOptionMenu(encabezado, values=list(modos), width=100,
+                                 command=lambda m: ctk.set_appearance_mode(modos[m]))
+        tema.set("Sistema")
+        tema.grid(row=0, column=1, sticky='e')
 
-        self.vista_previa = VistaPreviaAvanzada(preview_frame, app=self)
-        self.vista_previa.pack(fill=tk.BOTH, expand=True)
+        # Archivos
+        archivos = ctk.CTkFrame(lateral)
+        archivos.grid(row=1, column=0, sticky='ew', padx=16, pady=8)
+        archivos.grid_columnconfigure(1, weight=1)
+        filas = [
+            ("Plantilla PDF", self.var_plantilla, self.buscar_plantilla),
+            ("Datos Excel", self.var_datos, self.buscar_datos),
+            ("Nombre del curso", self.var_curso, None),
+            ("Carpeta de salida", self.var_salida, self.buscar_salida),
+        ]
+        for fila, (texto, var, comando) in enumerate(filas):
+            pady = (10 if fila == 0 else 4, 10 if fila == len(filas) - 1 else 4)
+            ctk.CTkLabel(archivos, text=texto).grid(row=fila, column=0, sticky='w', padx=(12, 8), pady=pady)
+            ctk.CTkEntry(archivos, textvariable=var).grid(
+                row=fila, column=1, columnspan=1 if comando else 2, sticky='ew',
+                padx=(0, 4 if comando else 12), pady=pady)
+            if comando:
+                self._boton_secundario(archivos, text="…", width=34, command=comando).grid(
+                    row=fila, column=2, padx=(4, 12), pady=pady)
 
-        # Navegador de registros
-        nav_frame = ttk.Frame(preview_frame)
-        nav_frame.pack(fill=tk.X, pady=5)
+        # Campos
+        cabecera = ctk.CTkFrame(lateral, fg_color='transparent')
+        cabecera.grid(row=2, column=0, sticky='ew', padx=16, pady=(8, 0))
+        cabecera.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(cabecera, text="Campos", font=ctk.CTkFont(size=15, weight='bold')).grid(
+            row=0, column=0, sticky='w')
+        ctk.CTkButton(cabecera, text="+ Agregar campo", width=130,
+                      command=self.agregar_campo).grid(row=0, column=1, sticky='e')
 
-        self.btn_anterior = ttk.Button(nav_frame, text="◄ Anterior", command=self.registro_anterior)
-        self.btn_anterior.pack(side=tk.LEFT, padx=5)
+        self.lista_campos = ctk.CTkScrollableFrame(lateral, width=440, fg_color='transparent')
+        self.lista_campos.grid(row=3, column=0, sticky='nsew', padx=10, pady=4)
 
-        self.label_registro = ttk.Label(nav_frame, text="Sin datos")
-        self.label_registro.pack(side=tk.LEFT, padx=10)
+        # Configuración
+        pie = ctk.CTkFrame(lateral, fg_color='transparent')
+        pie.grid(row=4, column=0, sticky='ew', padx=16, pady=(4, 16))
+        pie.grid_columnconfigure((0, 1), weight=1)
+        self._boton_secundario(pie, text="Guardar configuración", command=self.guardar_config).grid(
+            row=0, column=0, sticky='ew', padx=(0, 4))
+        self._boton_secundario(pie, text="Cargar configuración", command=self.cargar_config).grid(
+            row=0, column=1, sticky='ew', padx=(4, 0))
 
-        self.btn_siguiente = ttk.Button(nav_frame, text="Siguiente ►", command=self.registro_siguiente)
-        self.btn_siguiente.pack(side=tk.LEFT, padx=5)
+    def _crear_panel_vista_previa(self):
+        panel = ctk.CTkFrame(self, fg_color='transparent')
+        panel.grid(row=0, column=1, sticky='nsew', padx=16, pady=16)
+        panel.grid_columnconfigure(0, weight=1)
+        panel.grid_rowconfigure(1, weight=1)
+
+        # Barra superior: título, ayuda y navegador de registros
+        barra = ctk.CTkFrame(panel, fg_color='transparent')
+        barra.grid(row=0, column=0, sticky='ew', pady=(0, 8))
+        barra.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(barra, text="Vista previa", font=ctk.CTkFont(size=15, weight='bold')).grid(
+            row=0, column=0, sticky='w')
+        ctk.CTkLabel(barra, text="Arrastrá para mover · tirador para el ancho · flechas para ajustar (Shift ×10)",
+                     font=ctk.CTkFont(size=11), text_color=('gray45', 'gray55')).grid(
+            row=0, column=1, sticky='w', padx=12)
+
+        navegador = ctk.CTkFrame(barra, fg_color='transparent')
+        navegador.grid(row=0, column=2, sticky='e')
+        self.btn_anterior = self._boton_secundario(navegador, text="◀", width=34, command=self.registro_anterior)
+        self.btn_anterior.pack(side='left')
+        self.label_registro = ctk.CTkLabel(navegador, text="Sin datos", width=140)
+        self.label_registro.pack(side='left', padx=6)
+        self.btn_siguiente = self._boton_secundario(navegador, text="▶", width=34, command=self.registro_siguiente)
+        self.btn_siguiente.pack(side='left')
+
+        self.vista = VistaPrevia(panel, on_mover=self._on_campo_movido,
+                                 on_redimensionar=self._on_campo_redimensionado,
+                                 on_seleccionar=self._on_campo_seleccionado)
+        self.vista.grid(row=1, column=0, sticky='nsew')
+
+        # Barra inferior: estado, progreso y acción principal
+        inferior = ctk.CTkFrame(panel, fg_color='transparent')
+        inferior.grid(row=2, column=0, sticky='ew', pady=(10, 0))
+        inferior.grid_columnconfigure(0, weight=1)
+        self.label_estado = ctk.CTkLabel(inferior, text="", anchor='w', text_color=COLOR_ESTADO['info'])
+        self.label_estado.grid(row=0, column=0, sticky='ew')
+        self.progreso = ctk.CTkProgressBar(inferior)
+        self.progreso.set(0)
+        self.btn_generar = ctk.CTkButton(inferior, text="Generar certificados", height=40, width=200,
+                                         font=ctk.CTkFont(size=14, weight='bold'), command=self.generar)
+        self.btn_generar.grid(row=0, column=2, sticky='e', padx=(12, 0))
 
         self.actualizar_navegador()
 
-        for child in main_frame.winfo_children():
-            child.grid_configure(padx=5, pady=5) # Add padding to all widgets
-        self.curso_entry.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
+    # --- Estado y vista previa ---------------------------------------------
+
+    def _estado(self, texto, tipo='info'):
+        self.label_estado.configure(text=texto, text_color=COLOR_ESTADO[tipo])
+
+    def programar_vista_previa(self, demora=300):
+        """Debounce con after(): todo corre en el hilo de Tkinter."""
+        if self._preview_after:
+            self.after_cancel(self._preview_after)
+        self._preview_after = self.after(demora, self._refrescar_vista_previa)
+
+    def _refrescar_vista_previa(self):
+        self._preview_after = None
+        if self._generando:
+            return  # Se refresca al terminar
+        plantilla = self.var_plantilla.get().strip()
+        if not plantilla or not os.path.isfile(plantilla):
+            self.vista.mostrar_mensaje("Elegí una plantilla PDF para ver la vista previa")
+            return
+        datos = None
+        if self.df_excel is not None and len(self.df_excel) > 0:
+            datos = self.df_excel.iloc[self.registro_actual]
+        try:
+            self.vista.renderizar(plantilla, self.obtener_config_campos(), datos)
+        except Exception as e:
+            logging.error(f"Error al actualizar la vista previa: {e}")
+            self.vista.mostrar_mensaje(f"No se pudo generar la vista previa:\n{e}")
+
+    def _card_de(self, campo):
+        return next((c for c in self.cards if c.nombre() == campo), None)
+
+    def _on_campo_movido(self, campo, x, y):
+        card = self._card_de(campo)
+        if card:
+            card.set_posicion(x, y)
+
+    def _on_campo_redimensionado(self, campo, ancho):
+        card = self._card_de(campo)
+        if card:
+            card.set_ancho(ancho)
+
+    def _on_campo_seleccionado(self, campo):
+        for card in self.cards:
+            card.set_seleccionado(campo is not None and card.nombre() == campo)
+
+    # --- Navegador de registros ---------------------------------------------
 
     def actualizar_navegador(self):
-        """Actualiza el estado del navegador de registros"""
         if self.df_excel is not None and len(self.df_excel) > 0:
             total = len(self.df_excel)
-            self.label_registro.config(text=f"Registro {self.registro_actual + 1} de {total}")
-            self.btn_anterior.config(state='normal' if self.registro_actual > 0 else 'disabled')
-            self.btn_siguiente.config(state='normal' if self.registro_actual < total - 1 else 'disabled')
+            self.label_registro.configure(text=f"Registro {self.registro_actual + 1} de {total}")
+            self.btn_anterior.configure(state='normal' if self.registro_actual > 0 else 'disabled')
+            self.btn_siguiente.configure(state='normal' if self.registro_actual < total - 1 else 'disabled')
         else:
-            self.label_registro.config(text="Sin datos")
-            self.btn_anterior.config(state='disabled')
-            self.btn_siguiente.config(state='disabled')
+            self.label_registro.configure(text="Sin datos")
+            self.btn_anterior.configure(state='disabled')
+            self.btn_siguiente.configure(state='disabled')
 
     def registro_anterior(self):
-        """Navega al registro anterior"""
         if self.df_excel is not None and self.registro_actual > 0:
             self.registro_actual -= 1
             self.actualizar_navegador()
-            self.actualizar_vista_previa()
+            self.programar_vista_previa(0)
 
     def registro_siguiente(self):
-        """Navega al registro siguiente"""
         if self.df_excel is not None and self.registro_actual < len(self.df_excel) - 1:
             self.registro_actual += 1
             self.actualizar_navegador()
-            self.actualizar_vista_previa()
+            self.programar_vista_previa(0)
 
-    @debounce(1)  # Debounce with a 0.5 second delay
-    def actualizar_vista_previa(self):
-        plantilla = self.plantilla_entry.get()
-        campos = self.obtener_config_campos()
-        nombre_curso = self.curso_entry.get()
-        if plantilla and campos and nombre_curso:
-            try:
-                # Obtener datos del registro actual si hay Excel cargado
-                datos_registro = None
-                if self.df_excel is not None and len(self.df_excel) > 0:
-                    datos_registro = self.df_excel.iloc[self.registro_actual]
+    # --- Campos ---------------------------------------------------------------
 
-                self.vista_previa.actualizar_vista_previa(plantilla, campos, nombre_curso, datos_registro)
+    def agregar_campo(self, valores=None):
+        card = CampoCard(self.lista_campos, self.excel_columns, self.programar_vista_previa,
+                         self.eliminar_campo, valores)
+        card.pack(fill='x', padx=4, pady=6)
+        self.cards.append(card)
+        self.programar_vista_previa()
+        return card
 
-            except Exception as e:
-                logging.error(f"Error updating preview: {e}")
-    
+    def eliminar_campo(self, card):
+        self.cards.remove(card)
+        card.destroy()
+        self.programar_vista_previa()
 
+    def obtener_config_campos(self):
+        return {card.nombre(): card.get_config() for card in self.cards if card.nombre()}
 
-
-    def agregar_campo(self):
-        frame = ttk.Frame(self.campos_frame)
-        frame.grid(sticky='ew')  # Use grid instead of pack
-        
-        row = len(self.campos_frame.grid_slaves())  # Get the number of existing rows
-        
-        ttk.Label(frame, text="Campo:").grid(row=0, column=0, sticky='w')
-        campo = ttk.Combobox(frame, values=self.excel_columns, width=10)
-        campo.grid(row=0, column=1, padx=4, sticky='w')
-
-        ttk.Label(frame, text="Muestra:").grid(row=0, column=2, sticky='w')
-        texto_muestra_var = tk.StringVar(value="Texto de ejemplo")
-        texto_muestra = ttk.Entry(frame, width=15, textvariable=texto_muestra_var)
-        texto_muestra.grid(row=0, column=3, padx=4,pady=4, sticky='w')
-        frame.texto_muestra_var = texto_muestra_var  # Guardar referencia
-
-        ttk.Label(frame, text="X: (420-A4)").grid(row=0, column=4, sticky='w')
-        x_var = tk.StringVar(value="420")
-        x = ttk.Entry(frame, width=5, textvariable=x_var)
-        x.grid(row=0, column=5, padx=4, sticky='w')
-        frame.x_var = x_var  # Guardar referencia
-
-        ttk.Label(frame, text="Y:").grid(row=0, column=6, sticky='w')
-        y_var = tk.StringVar(value="270")
-        y = ttk.Entry(frame, width=5, textvariable=y_var)
-        y.grid(row=0, column=7, padx=4, sticky='w')
-        frame.y_var = y_var  # Guardar referencia
-
-        ttk.Label(frame, text="Fuente:").grid(row=0, column=8, sticky='w')
-        fuentes = ["Helvetica", "Times-Roman", "Courier"]
-        fuente = ttk.Combobox(frame, values=fuentes, width=10)
-        fuente.set(fuentes[1])
-        fuente.grid(row=0, column=9, padx=4, sticky='w')
-
-        ttk.Label(frame, text="Tamaño:").grid(row=1, column=0, sticky='w')
-        tamanos = list(range(8, 73, 2))
-        tamano = ttk.Combobox(frame, values=tamanos, width=5)
-        tamano.set(20)
-        tamano.grid(row=1, column=1, padx=2, sticky='w')
-
-        ttk.Label(frame, text="Alineación:").grid(row=1, column=2, sticky='w')
-        alineaciones = ["Izquierda", "Centro", "Derecha"]
-        alineacion = ttk.Combobox(frame, values=alineaciones, width=8)
-        alineacion.set("Centro")
-        alineacion.grid(row=1, column=3, padx=4, sticky='w')
-
-        ttk.Label(frame, text="Estilo:").grid(row=1, column=4, sticky='w')
-        bold_var = tk.BooleanVar(value=True)  # Negrita activada por defecto
-        bold_check = ttk.Checkbutton(frame, text="Negrita", variable=bold_var)
-        bold_check.grid(row=1, column=5, padx=4, sticky='w')
-        italic_var = tk.BooleanVar(value=False)
-        italic_check = ttk.Checkbutton(frame, text="Cursiva", variable=italic_var)
-        italic_check.grid(row=1, column=6, padx=4, sticky='w')
-        frame.bold_var = bold_var
-        frame.italic_var = italic_var
-
-        # Nuevo campo: Ancho máximo para dividir texto en líneas
-        ttk.Label(frame, text="Ancho máx:").grid(row=2, column=0, sticky='w')
-        ancho_maximo_var = tk.StringVar(value="600")
-        ancho_maximo = ttk.Entry(frame, width=5, textvariable=ancho_maximo_var)
-        ancho_maximo.grid(row=2, column=1, padx=4, sticky='w')
-        ttk.Label(frame, text="(0=sin límite)").grid(row=2, column=2, sticky='w')
-        frame.ancho_maximo_var = ancho_maximo_var  # Guardar referencia
-
-        # Nuevo campo: Interlineado
-        ttk.Label(frame, text="Interlineado:").grid(row=2, column=3, sticky='w')
-        interlineado_var = tk.StringVar(value="25")
-        interlineado = ttk.Entry(frame, width=5, textvariable=interlineado_var)
-        interlineado.grid(row=2, column=4, padx=4, sticky='w')
-        ttk.Label(frame, text="(0=auto)").grid(row=2, column=5, columnspan=2, sticky='w')
-        frame.interlineado_var = interlineado_var  # Guardar referencia
-
-        ttk.Button(frame, text="Eliminar", command=lambda: frame.destroy()).grid(row=2, column=7, padx=2, sticky='e')
-            # Add a separator after the "Eliminar" button
-        separator = ttk.Separator(frame, orient='horizontal')
-        separator.grid(row=3, column=0, columnspan=10, sticky='ew', pady=5)
-
-        # Store the separator reference in the frame for later use
-        frame.separator = separator
-        
-
-        # Add callbacks for updating preview
-        self.plantilla_entry.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
-        self.datos_entry.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
-        self.curso_entry.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
-        self.salida_entry.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
-        campo.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
-        texto_muestra.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
-        x.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
-        y.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
-        fuente.bind('<<ComboboxSelected>>', lambda e: self.actualizar_vista_previa())
-        tamano.bind('<<ComboboxSelected>>', lambda e: self.actualizar_vista_previa())
-        alineacion.bind('<<ComboboxSelected>>', lambda e: self.actualizar_vista_previa())
-        bold_var.trace_add('write', lambda *args: self.actualizar_vista_previa())
-        italic_var.trace_add('write', lambda *args: self.actualizar_vista_previa())
-        ancho_maximo.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
-        interlineado.bind('<KeyRelease>', lambda e: self.actualizar_vista_previa())
-
-        return frame
+    # --- Archivos ---------------------------------------------------------------
 
     def buscar_plantilla(self):
-        filename = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
-        self.plantilla_entry.delete(0, tk.END)
-        self.plantilla_entry.insert(0, filename)
-        self.actualizar_vista_previa()
+        filename = filedialog.askopenfilename(filetypes=[("Archivos PDF", "*.pdf")])
+        if filename:  # Si se cancela, se conserva la ruta anterior
+            self.var_plantilla.set(filename)
 
     def buscar_datos(self):
-        filename = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
-        self.datos_entry.delete(0, tk.END)
-        self.datos_entry.insert(0, filename)
-        self.cargar_columnas_excel(filename)
-
-    def cargar_columnas_excel(self, filename):
-        try:
-            self.df_excel = pd.read_excel(filename)
-            self.excel_columns = list(self.df_excel.columns)
-            self.registro_actual = 0  # Resetear al primer registro
-
-            for frame in self.campos_frame.winfo_children():
-                campo = frame.winfo_children()[1]  # El combobox de campo está en la segunda posición
-                campo['values'] = self.excel_columns
-
-            # Actualizar el navegador de registros y vista previa
-            self.actualizar_navegador()
-            self.actualizar_vista_previa()
-        except Exception as e:
-            messagebox.showerror("Error", f"Error al cargar columnas del archivo Excel: {str(e)}")
-
+        filename = filedialog.askopenfilename(filetypes=[("Archivos Excel", "*.xlsx")])
+        if filename:
+            self.var_datos.set(filename)
+            self.cargar_columnas_excel(filename)
 
     def buscar_salida(self):
         directory = filedialog.askdirectory()
-        self.salida_entry.delete(0, tk.END)
-        self.salida_entry.insert(0, directory)
+        if directory:
+            self.var_salida.set(directory)
 
-    def obtener_config_campos(self):
-        config = {}
+    def cargar_columnas_excel(self, filename, silencioso=False):
+        try:
+            self.df_excel = pd.read_excel(filename)
+        except Exception as e:
+            self.df_excel = None
+            self.excel_columns = []
+            logging.error(f"Error al cargar el Excel {filename}: {e}")
+            if silencioso:
+                self._estado(f"No se pudo leer el Excel: {e}", 'error')
+            else:
+                messagebox.showerror("Error", f"Error al cargar el archivo Excel:\n{e}")
+        else:
+            self.excel_columns = [str(c) for c in self.df_excel.columns]
+            self._estado(f"Excel cargado: {len(self.df_excel)} registros, {len(self.excel_columns)} columnas")
 
-        for frame in self.campos_frame.winfo_children():
-            entries = [widget for widget in frame.winfo_children() if isinstance(widget, (ttk.Entry, ttk.Combobox))]
-            if len(entries) >= 9:  # Ahora tenemos más campos (incluyendo ancho_maximo e interlineado)
-                campo, texto_muestra, x, y, fuente, tamano, alineacion, ancho_maximo, interlineado = entries[:9]
+        self.registro_actual = 0
+        for card in self.cards:
+            card.set_columnas(self.excel_columns)
+        self.actualizar_navegador()
+        self.programar_vista_previa()
 
-                # Obtener ancho máximo, validar que sea número
-                ancho_max_val = ancho_maximo.get() if ancho_maximo.get().replace('.', '', 1).isdigit() else '0'
-                ancho_max_val = float(ancho_max_val) if ancho_max_val else 0
+    # --- Configuración ------------------------------------------------------
 
-                # Obtener interlineado, validar que sea número
-                interlineado_val = interlineado.get() if interlineado.get().replace('.', '', 1).isdigit() else '0'
-                interlineado_val = float(interlineado_val) if interlineado_val else 0
+    def _config_actual(self):
+        return {
+            'plantilla': self.var_plantilla.get(),
+            'datos': self.var_datos.get(),
+            'curso': self.var_curso.get(),
+            'salida': self.var_salida.get(),
+            'campos': self.obtener_config_campos(),
+        }
 
-                config[campo.get()] = {
-                    'texto_muestra': texto_muestra.get(),
-                    'x': int(x.get()) if x.get().isdigit() else 0,
-                    'y': int(y.get()) if y.get().isdigit() else 0,
-                    'fuente': fuente.get(),
-                    'tamaño': int(tamano.get()),
-                    'alineacion': alineacion.get(),
-                    'negrita': frame.bold_var.get(),
-                    'cursiva': frame.italic_var.get(),
-                    'ancho_maximo': ancho_max_val,
-                    'interlineado': interlineado_val
-                }
-        return config
-
-    def generar(self):
-        plantilla = self.plantilla_entry.get()
-        datos = self.datos_entry.get()
-        curso = self.curso_entry.get()
-        salida = self.salida_entry.get()
-        config = self.obtener_config_campos()
-
-        if not all([plantilla, datos, curso, salida, config]):
-            messagebox.showerror("Error", "Todos los campos son obligatorios")
-            return
-
-        self.guardar_config()  # Guardar la configuración actual antes de generar
-        generar_certificados(plantilla, datos, config, salida, curso)
-        #self.actualizar_vista_previa()
-
-
+    def _escribir_config(self, ruta):
+        with open(ruta, 'w', encoding='utf-8') as f:
+            json.dump(self._config_actual(), f, ensure_ascii=False, indent=2)
 
     def guardar_config(self):
-        config = {
-            'plantilla': self.plantilla_entry.get(),
-            'datos': self.datos_entry.get(),
-            'curso': self.curso_entry.get(),
-            'salida': self.salida_entry.get(),
-            'campos': self.obtener_config_campos()
-        }
-        
-        # Guardar la última configuración
-        with open('ultima_config.json', 'w') as f:
-            json.dump(config, f)
-        
-        # Guardar una copia en la ubicación seleccionada
-        directorio_salida = self.salida_entry.get()
-        if directorio_salida:
-            nombre_archivo = f"config_{self.curso_entry.get().replace(' ', '_')}.json"
-            ruta_completa = os.path.join(directorio_salida, nombre_archivo)
-            with open(ruta_completa, 'w') as f:
-                json.dump(config, f)
-            messagebox.showinfo("Éxito", f"Configuración guardada en:\n{ruta_completa}")
-        else:
-            messagebox.showwarning("Advertencia", "No se ha seleccionado un directorio de salida. Solo se ha guardado la última configuración.")
+        try:
+            self._escribir_config(CONFIG_ULTIMA)
+        except OSError as e:
+            logging.error(f"No se pudo guardar {CONFIG_ULTIMA}: {e}")
 
+        salida = self.var_salida.get()
+        curso = nombre_archivo_seguro(self.var_curso.get().strip().replace(' ', '_') or 'certificados')
+        ruta = filedialog.asksaveasfilename(
+            title="Guardar configuración", defaultextension='.json',
+            filetypes=[("Configuración JSON", "*.json")],
+            initialdir=salida if os.path.isdir(salida) else None,
+            initialfile=f"config_{curso}.json")
+        if not ruta:
+            return
+        try:
+            self._escribir_config(ruta)
+            self._estado(f"Configuración guardada en {ruta}", 'ok')
+        except OSError as e:
+            messagebox.showerror("Error", f"No se pudo guardar la configuración:\n{e}")
 
-
-
-    def cargar_config(self, filename=None):
+    def cargar_config(self, filename=None, silencioso=False):
         if not filename:
-            filename = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
-        if filename and os.path.exists(filename):
-            with open(filename, 'r') as f:
+            filename = filedialog.askopenfilename(filetypes=[("Configuración JSON", "*.json")])
+        if not filename or not os.path.exists(filename):
+            return
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-            
-            self.plantilla_entry.delete(0, tk.END)
-            self.plantilla_entry.insert(0, config.get('plantilla', ''))
-            
-            self.datos_entry.delete(0, tk.END)
-            self.datos_entry.insert(0, config.get('datos', ''))
-            
-            self.curso_entry.delete(0, tk.END)
-            self.curso_entry.insert(0, config.get('curso', ''))
-            
-            self.salida_entry.delete(0, tk.END)
-            self.salida_entry.insert(0, config.get('salida', ''))
-            
-            # Limpiar campos existentes
-            for widget in self.campos_frame.winfo_children():
-                widget.destroy()
+        except Exception as e:
+            logging.error(f"No se pudo leer la configuración {filename}: {e}")
+            if not silencioso:
+                messagebox.showerror("Error", f"No se pudo leer la configuración:\n{e}")
+            return
 
-            # Cargar configuración de campos
-            for campo, valores in config.get('campos', {}).items():
-                frame = self.agregar_campo()
-                entries = [widget for widget in frame.winfo_children() if isinstance(widget, (ttk.Entry, ttk.Combobox))]
+        self.var_plantilla.set(config.get('plantilla', ''))
+        self.var_datos.set(config.get('datos', ''))
+        self.var_curso.set(config.get('curso', ''))
+        self.var_salida.set(config.get('salida', ''))
 
-                if len(entries) >= 9:
-                    campo_entry, texto_muestra_entry, x_entry, y_entry, fuente_combo, tamano_combo, alineacion_combo, ancho_maximo_entry, interlineado_entry = entries[:9]
+        for card in self.cards:
+            card.destroy()
+        self.cards = []
+        for nombre, valores in config.get('campos', {}).items():
+            self.agregar_campo({**valores, 'nombre': nombre})
 
-                    # Cargar valores usando los StringVar del frame
-                    campo_entry.set(campo)  # Combobox usa .set()
-                    frame.texto_muestra_var.set(valores.get('texto_muestra', ''))
-                    frame.x_var.set(str(valores.get('x', 420)))
-                    frame.y_var.set(str(valores.get('y', 270)))
-                    fuente_combo.set(valores.get('fuente', 'Times-Roman'))
-                    tamano_combo.set(valores.get('tamaño', 20))
-                    alineacion_combo.set(valores.get('alineacion', 'Centro'))
+        datos = config.get('datos', '')
+        if datos and os.path.isfile(datos):
+            self.cargar_columnas_excel(datos, silencioso=True)
 
-                    # Cargar ancho máximo e interlineado usando StringVar
-                    frame.ancho_maximo_var.set(str(valores.get('ancho_maximo', 600)))
-                    frame.interlineado_var.set(str(valores.get('interlineado', 25)))
+        if not silencioso:
+            self._estado(f"Configuración cargada desde {filename}", 'ok')
+        self.programar_vista_previa()
 
-                    frame.bold_var.set(valores.get('negrita', True))
-                    frame.italic_var.set(valores.get('cursiva', False))
+    # --- Generación ---------------------------------------------------------
+
+    def elegir_columna_indice(self, columnas):
+        """Diálogo modal para elegir la columna que nombra los archivos. Devuelve None si se cancela."""
+        dialogo = ctk.CTkToplevel(self)
+        dialogo.title("Columna para nombrar los archivos")
+        dialogo.geometry("420x200")
+        dialogo.resizable(False, False)
+        dialogo.transient(self)
+
+        resultado = {'columna': None}
+        var = tk.StringVar(value=columnas[0] if columnas else '')
+
+        ctk.CTkLabel(dialogo, text="El Excel no tiene la columna 'dni'.\n"
+                                   "Elegí qué columna usar para nombrar los archivos:",
+                     justify='left').pack(padx=20, pady=(20, 10), anchor='w')
+        ctk.CTkOptionMenu(dialogo, values=columnas or [''], variable=var).pack(padx=20, fill='x')
+
+        def aceptar():
+            resultado['columna'] = var.get() or None
+            dialogo.destroy()
+
+        botones = ctk.CTkFrame(dialogo, fg_color='transparent')
+        botones.pack(pady=20)
+        self._boton_secundario(botones, text="Cancelar", command=dialogo.destroy).pack(side='left', padx=6)
+        ctk.CTkButton(botones, text="Aceptar", command=aceptar).pack(side='left', padx=6)
+        dialogo.protocol("WM_DELETE_WINDOW", dialogo.destroy)  # La X equivale a cancelar
+
+        def modal():
+            # grab_set falla si la ventana todavía no es visible
+            try:
+                dialogo.lift()
+                dialogo.focus_force()
+                dialogo.grab_set()
+            except tk.TclError:
+                pass
+
+        dialogo.after(100, modal)
+        self.wait_window(dialogo)
+        return resultado['columna']
+
+    def generar(self):
+        if self._generando:
+            return
+        plantilla = self.var_plantilla.get().strip()
+        datos = self.var_datos.get().strip()
+        curso = self.var_curso.get().strip()
+        salida = self.var_salida.get().strip()
+        config = self.obtener_config_campos()
+
+        faltantes = [nombre for nombre, valor in (("plantilla PDF", plantilla), ("datos Excel", datos),
+                                                  ("nombre del curso", curso), ("carpeta de salida", salida),
+                                                  ("al menos un campo", config)) if not valor]
+        if faltantes:
+            messagebox.showerror("Faltan datos", "Completá: " + ", ".join(faltantes) + ".")
+            return
+        if not os.path.isfile(plantilla):
+            messagebox.showerror("Error", f"No se encuentra la plantilla:\n{plantilla}")
+            return
+        if not os.path.isdir(salida):
+            messagebox.showerror("Error", f"La carpeta de salida no existe:\n{salida}")
+            return
+
+        try:
+            df = pd.read_excel(datos)
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo leer el Excel:\n{e}")
+            return
+
+        columna = 'dni' if 'dni' in df.columns else self.elegir_columna_indice([str(c) for c in df.columns])
+        if not columna:
+            self._estado("Generación cancelada: no se eligió una columna para nombrar los archivos.", 'error')
+            return
+
+        try:
+            self._escribir_config(CONFIG_ULTIMA)
+        except OSError as e:
+            logging.error(f"No se pudo guardar {CONFIG_ULTIMA}: {e}")
+
+        self._generando = True
+        self.vista.bloqueada = True
+        self._salida_actual = salida
+        self.btn_generar.configure(state='disabled', text="Generando…")
+        self.progreso.set(0)
+        self.progreso.grid(row=0, column=1, sticky='ew', padx=(12, 0))
+        self._estado(f"Generando 0 de {len(df)}…")
+
+        threading.Thread(target=self._trabajo_generar, daemon=True,
+                         args=(plantilla, df, config, salida, curso, columna)).start()
+        self.after(100, self._revisar_cola)
+
+    def _trabajo_generar(self, *args):
+        """Corre en un hilo aparte: solo se comunica con la interfaz mediante la cola."""
+        try:
+            generados, errores = generar_certificados(
+                *args, on_progreso=lambda n, total: self._cola.put(('progreso', n, total)))
+            self._cola.put(('fin', generados, errores))
+        except Exception as e:
+            logging.exception("Error al generar certificados")
+            self._cola.put(('fin', 0, [str(e)]))
+
+    def _revisar_cola(self):
+        try:
+            while True:
+                mensaje = self._cola.get_nowait()
+                if mensaje[0] == 'progreso':
+                    _, n, total = mensaje
+                    self.progreso.set(n / total if total else 1)
+                    self._estado(f"Generando {n} de {total}…")
+                else:
+                    self._terminar_generacion(mensaje[1], mensaje[2])
+                    return
+        except queue.Empty:
+            pass
+        self.after(100, self._revisar_cola)
+
+    def _terminar_generacion(self, generados, errores):
+        self._generando = False
+        self.vista.bloqueada = False
+        self.btn_generar.configure(state='normal', text="Generar certificados")
+        self.progreso.grid_remove()
+
+        if errores:
+            self._estado(f"{generados} certificados generados, {len(errores)} con errores "
+                         f"(ver errores_certificados.log).", 'error')
+            detalle = "\n".join(errores[:10]) + ("\n…" if len(errores) > 10 else "")
+            messagebox.showwarning("Generación con errores",
+                                   f"Se generaron {generados} certificados.\n"
+                                   f"Fallaron {len(errores)}:\n\n{detalle}")
+        else:
+            self._estado(f"✓ {generados} certificados generados en {self._salida_actual}", 'ok')
+        self.programar_vista_previa(0)
 
 
-
-            if filename != 'ultima_config.json':
-                messagebox.showinfo("Éxito", f"Configuración cargada desde:\n{filename}")
-        self.actualizar_vista_previa()
-
-
-root = tk.Tk()  # Crear la ventana principal
-root.geometry("1366x768")    # Establecer el tamaño de la ventana
-root.resizable(False, False)    # La ventana no se puede redimensionar
-# root.iconbitmap('Certificado.ico')    # Establecer el icono de la ventana
-try:
-    root.iconphoto(False, tk.PhotoImage(file='Certificado.png'))    # Establecer el icono de la ventana
-except Exception as e:
-    logging.warning(f"No se pudo cargar el icono: {e}")
-app = Application(master=root) # Crear la aplicación
-app.mainloop() # Iniciar la aplicación
+if __name__ == '__main__':
+    ctk.set_appearance_mode('system')
+    ctk.set_default_color_theme('blue')
+    app = Application()
+    app.mainloop()
