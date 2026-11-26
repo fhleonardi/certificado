@@ -1,3 +1,5 @@
 - **Título del Proyecto: Certificados en PDF**
 - **Descripción: Aplicación con interfaz gráfica para generar certificados de curso en PDF desde un archivo en EXCEL, utilizando una plantilla en PDF**
 - Guarda la configuración en archivo JSON y permite ubicar la posicion de cada uno de los items dentro de la plantilla PDF (Ej.: Nombre, Aopellido, DNI, etc.)
+
+pyinstaller --onefile -w certificado.py --icon=certificado.png
